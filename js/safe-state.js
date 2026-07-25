@@ -1402,6 +1402,47 @@ async function flushRecordOne({db}, item){
   throw new Error("检测到旧版账单队列，请先执行迁移或清除旧待同步队列");
 }
 
+async function flushRecordQueueConcurrently({db},recordItems,onProgress){
+  // 同一账单的修改必须保持原顺序；不同账单互不覆盖，可以安全并发。
+  const groups = new Map();
+  for(const item of recordItems){
+    const key = String(item?.recordId || item?.id || "");
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(item);
+  }
+  const queues = [...groups.values()];
+  let nextQueueIndex = 0;
+  let completed = 0;
+  let fatalError = null;
+  const workerCount = Math.min(4,queues.length);
+
+  const worker = async()=>{
+    while(!fatalError && navigator.onLine){
+      const queueIndex = nextQueueIndex++;
+      if(queueIndex >= queues.length) return;
+      for(const item of queues[queueIndex]){
+        if(fatalError || !navigator.onLine) return;
+        try{
+          await withTimeout(flushRecordOne({db},item),CLOUD_SYNC_TIMEOUT_MS,"收银记录同步");
+        }catch(error){
+          if(error?.code==="sync-conflict"){
+            await quarantineConflict(db,item,error,"recordQueue");
+            console.warn("账单操作发生并发冲突，已隔离等待人工确认",item,error);
+          }else{
+            fatalError = error;
+            return;
+          }
+        }
+        completed += 1;
+        onProgress?.(completed);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({length:workerCount},()=>worker()));
+  if(fatalError) throw fatalError;
+}
+
 export async function flushPending({db,ref}){
   if(!navigator.onLine) return;
 
@@ -1436,19 +1477,15 @@ export async function flushPending({db,ref}){
         throw error;
       }
     }
-    for(const item of recordItems){
-      if(!navigator.onLine) break;
-      try{
-        await withTimeout(flushRecordOne({db},item),CLOUD_SYNC_TIMEOUT_MS,"收银记录同步");
-      }catch(error){
-        if(error?.code==="sync-conflict"){
-          await quarantineConflict(db,item,error,"recordQueue");
-          console.warn("账单操作发生并发冲突，已隔离等待人工确认",item,error);
-          continue;
+    try{
+      await flushRecordQueueConcurrently({db},recordItems,completed=>{
+        if(completed === recordItems.length || completed % 10 === 0){
+          setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completed}/${total} 项`);
         }
-        setSyncStatus("error",`● 账单同步失败：${error?.code || error?.message || error}`);
-        throw error;
-      }
+      });
+    }catch(error){
+      setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
+      throw error;
     }
 
     const left = (await queueAll("queue")).length + (await queueAll("recordQueue")).length;

@@ -168,7 +168,12 @@
 </div>
 
   <div class="panel" id="recordsPanel">
-    <h2 id="recordsTitle">收银记录</h2>
+    <div class="section-toggle">
+      <h2 id="recordsTitle">收银记录</h2>
+      <button id="recordsTimeSortBtn" class="btn-ghost" type="button" onclick="toggleRecordTimeSort()">
+        时间：新 → 旧
+      </button>
+    </div>
     <div id="recordDateFilterNote" class="record-date-filter-note" style="display:none;"></div>
 
 <div class="panel">
@@ -315,7 +320,7 @@
 
   window.addEventListener("DOMContentLoaded", async ()=>{
     renderNav("owner");
-    import("./js/owner.js?v=4.0.31").catch(e=>{
+    import("./js/owner.js?v=4.0.32").catch(e=>{
   console.error(e);
   alert(
     e.message +

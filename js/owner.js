@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.31";
-import { RMB_PER_JPY } from "./business-day.js?v=4.0.31";
+﻿import { db } from "./firebase.js?v=4.0.32";
+import { RMB_PER_JPY } from "./business-day.js?v=4.0.32";
 
 import { doc, onSnapshot, collection, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.31";
-import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.31";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.32";
+import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.32";
 
 const ref = doc(db,"shop","main");
 const recordsRef = collection(db,"records");
@@ -32,6 +32,7 @@ let currentFilter = "today";
 let currencyMode = "CONVERTED";
 let selectedChartDate = "";
 let chartHitPoints = [];
+let recordsTimeSortDirection = "desc";
 let packagePanelOpen = false;
 let records = [];
 loadLocalRecords().then(localRecords=>{
@@ -839,9 +840,13 @@ function renderPackages(){
 function renderRecords(){
   const rows = getFilteredRecords()
     .filter(r=>!selectedChartDate || getRecordBusinessDate(r) === selectedChartDate)
-    .reverse();
+    .sort((a,b)=>{
+      const difference = Number(getRecordTimestamp(a) || 0) - Number(getRecordTimestamp(b) || 0);
+      return recordsTimeSortDirection === "asc" ? difference : -difference;
+    });
   const title = document.getElementById("recordsTitle");
   const note = document.getElementById("recordDateFilterNote");
+  const sortButton = document.getElementById("recordsTimeSortBtn");
   if(title){
     title.innerText = selectedChartDate
       ? `${selectedChartDate} 收银记录`
@@ -852,6 +857,11 @@ function renderRecords(){
     note.innerHTML = selectedChartDate
       ? `<span>当前显示营业日：${selectedChartDate}（${rows.length}笔）</span><button class="btn-ghost" type="button" onclick="clearChartDateFilter()">显示当前范围全部记录</button>`
       : "";
+  }
+  if(sortButton){
+    sortButton.innerText = recordsTimeSortDirection === "asc"
+      ? "时间：旧 → 新"
+      : "时间：新 → 旧";
   }
 
   document.getElementById("records").innerHTML = rows.length ? rows.map(r=>{
@@ -1384,6 +1394,11 @@ function clearChartDateFilter(){
   renderRecords();
 }
 
+function toggleRecordTimeSort(){
+  recordsTimeSortDirection = recordsTimeSortDirection === "asc" ? "desc" : "asc";
+  renderRecords();
+}
+
 function setCurrencyMode(v){
   currencyMode = v;
   render();
@@ -1483,6 +1498,7 @@ window.saveBusinessHours = saveBusinessHours;
 window.togglePackagePanel = togglePackagePanel;
 window.setFilter = setFilter;
 window.clearChartDateFilter = clearChartDateFilter;
+window.toggleRecordTimeSort = toggleRecordTimeSort;
 window.setCurrencyMode = setCurrencyMode;
 window.addPackage = addPackage;
 window.removePackage = removePackage;

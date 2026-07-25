@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.31";
+﻿import { db } from "./firebase.js?v=4.0.32";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.31";
-import { resetTable } from "./common.js?v=4.0.31";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.31";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.31";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.32";
+import { resetTable } from "./common.js?v=4.0.32";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.32";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.32";
 
 const ref = doc(db, "shop", "main");
 let state = null;
@@ -78,6 +78,7 @@ let bookingAutoRefreshTimer = null;
 let runningTimeTextTimer = null;
 let quickBookingInitialized = false;
 let quickBookingOpen = false;
+const repairingTableRecords = new Set();
 
 
 const MOVE_LINE_COLORS = [
@@ -204,23 +205,16 @@ onSnapshot(ref, { includeMetadataChanges:true }, async snap=>{
       name:(i+1)+"号桌"
     }));
   }
-  let needSave = false;
-
-Promise.all(
-  state.tables.map(async t=>{
-    if(t.start && !t.recordId){
-      await createOrUpdateTableRecord(t,{
-        customerType: t.type === "booking" ? "booking" : "walkin",
-        checkoutMethod: "补写开始计时账单"
-      });
-      needSave = true;
-    }
-  })
-).then(()=>{
-  if(needSave){
-    save();
+  /*
+   * 只有服务器已经确认的快照才能触发缺失账单修复。
+   * 缓存快照和本机待写入快照可能暂时没有 recordId，旧实现会把这种
+   * 正常同步延迟误判成账单丢失，从而为同一次到店反复创建随机ID账单。
+   */
+  if(!snap.metadata.fromCache && !snap.metadata.hasPendingWrites){
+    repairMissingRunningTableRecords().catch(error=>{
+      console.warn("检查缺失计时账单失败",error);
+    });
   }
-});
 
 
 try{
@@ -524,7 +518,8 @@ async function syncGroupPrepaymentsToRunningTables(booking, group){
 async function createOrUpdateTableRecord(t, {
   customerType = "walkin",
   checkoutMethod = "开始计时",
-  prepaidLines = null
+  prepaidLines = null,
+  deterministicRecordId = ""
 } = {}){
 
   const p = state.packages?.[Number(t.packageIndex || 0)] || {};
@@ -541,8 +536,10 @@ async function createOrUpdateTableRecord(t, {
   }
 
   if(!record){
+    const nextRecordId = deterministicRecordId ||
+      "rec_" + now + "_" + Math.random().toString(36).slice(2,8);
     record = {
-      id:"rec_" + now + "_" + Math.random().toString(36).slice(2,8),
+      id:nextRecordId,
       timestamp:now,
       time:new Date(now).toLocaleString(),
       receiptImage:"",
@@ -611,6 +608,45 @@ async function createOrUpdateTableRecord(t, {
   await saveRecordSafely({db,ref,record});
 
   return record;
+}
+
+function repairedRecordIdForTable(table, tableIndex){
+  const stableVisitKey =
+    table?.visitId ||
+    table?.recordId ||
+    `${table?.bookingId || table?.groupId || "table"}_${Number(table?.start || 0)}`;
+  const safeKey = String(stableVisitKey).replace(/[^a-zA-Z0-9_-]/g,"_");
+  return `rec_repair_${String(Number(tableIndex) + 1).padStart(2,"0")}_${safeKey}`;
+}
+
+async function repairMissingRunningTableRecords(){
+  if(!state?.tables?.length) return;
+  let needSave = false;
+
+  await Promise.all(state.tables.map(async (table,tableIndex)=>{
+    if(!table?.start || table.recordId) return;
+
+    const repairKey = `${tableIndex}:${table.visitId || table.bookingId || table.groupId || table.start}`;
+    if(repairingTableRecords.has(repairKey)) return;
+    repairingTableRecords.add(repairKey);
+
+    try{
+      const deterministicRecordId = repairedRecordIdForTable(table,tableIndex);
+      table.recordId = deterministicRecordId;
+      await createOrUpdateTableRecord(table,{
+        customerType:table.type === "booking" ? "booking" : "walkin",
+        checkoutMethod:"补写开始计时账单",
+        deterministicRecordId
+      });
+      needSave = true;
+    }finally{
+      repairingTableRecords.delete(repairKey);
+    }
+  }));
+
+  if(needSave){
+    await save("repair_missing_table_record");
+  }
 }
 
 

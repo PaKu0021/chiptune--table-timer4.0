@@ -144,9 +144,9 @@ button:active{
 
 .card.compact-table-card.collapsed{
   align-self:start;
-  height:112px;
-  min-height:112px;
-  max-height:112px;
+  height:auto;
+  min-height:0;
+  max-height:none;
   padding:0;
   overflow:hidden;
 }
@@ -163,7 +163,7 @@ button:active{
 
 .table-card-summary{
   width:100%;
-  min-height:112px;
+  min-height:132px;
   margin:0;
   padding:16px 18px;
   border:0;
@@ -196,6 +196,8 @@ button:active{
   color:#756d62;
   font-size:13px;
   font-weight:800;
+  line-height:1.35;
+  white-space:normal;
   overflow-wrap:anywhere;
 }
 

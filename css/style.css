@@ -645,6 +645,91 @@ button.selected-pop{
   min-width:900px;
 }
 
+.quick-booking-help{
+  margin:4px 0 0;
+  color:var(--muted);
+  font-weight:700;
+}
+
+.quick-booking-form{
+  display:grid;
+  grid-template-columns:repeat(5,minmax(140px,1fr));
+  gap:12px;
+  margin:16px 0;
+}
+
+.quick-booking-form label{
+  display:grid;
+  gap:7px;
+  color:var(--muted);
+  font-weight:800;
+}
+
+.quick-booking-table-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin:8px 0;
+}
+
+.quick-booking-table-head span,
+.quick-booking-hint{
+  color:var(--muted);
+  font-weight:700;
+}
+
+.quick-booking-tables{
+  display:grid;
+  grid-template-columns:repeat(7,minmax(86px,1fr));
+  gap:8px;
+  margin-bottom:10px;
+}
+
+.quick-table-choice{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+  min-height:48px;
+  padding:8px;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:#fff;
+  color:var(--text);
+  font-weight:900;
+}
+
+.quick-table-choice.selected{
+  background:#fff0b7;
+  border-color:#d8a900;
+}
+
+.quick-table-choice.unavailable{
+  background:#eee;
+  color:#999;
+}
+
+.quick-table-choice input{
+  width:18px;
+  height:18px;
+  margin:0;
+}
+
+.quick-booking-hint{
+  min-height:24px;
+  margin:8px 0 12px;
+}
+
+@media(max-width:900px){
+  .quick-booking-form{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
+  .quick-booking-tables{
+    grid-template-columns:repeat(4,minmax(72px,1fr));
+  }
+}
+
 .grid-head{
   position:sticky;
   top:0;

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>预约系统</title>
-<link rel="stylesheet" href="./css/style.css">
+<link rel="stylesheet" href="./css/style.css?v=4.0.28">
 </head>
 
 <body>
@@ -22,6 +22,54 @@
   <button class="btn-ghost" onclick="printBookingGrid()">打印时间表</button>
 </div>
   </div>
+
+<div class="panel quick-booking-panel">
+  <div class="section-toggle">
+    <div>
+      <h2>快速输入预约</h2>
+      <p class="quick-booking-help">选择当前日期的到店时间和套餐，系统会优先推荐相邻桌位，也可以手动选择桌号。</p>
+    </div>
+    <button class="btn-main" type="button" onclick="recommendQuickBookingTables()">推荐邻近桌位</button>
+  </div>
+
+  <div class="quick-booking-form">
+    <label>
+      到店时间
+      <input id="quickBookingTime" type="time" step="300" onchange="refreshQuickBookingAvailability()">
+    </label>
+
+    <label>
+      套餐
+      <select id="quickBookingPackage" onchange="refreshQuickBookingAvailability()"></select>
+    </label>
+
+    <label>
+      客人姓名
+      <input id="quickBookingName" autocomplete="off" placeholder="请输入姓名">
+    </label>
+
+    <label>
+      手机尾号后四位
+      <input id="quickBookingPhone" type="tel" inputmode="numeric" maxlength="4" placeholder="0000">
+    </label>
+
+    <label>
+      人数
+      <input id="quickBookingPeople" type="number" inputmode="numeric" min="1" max="14" value="1" onchange="recommendQuickBookingTables()">
+    </label>
+  </div>
+
+  <div class="quick-booking-table-head">
+    <strong>桌号（可多选）</strong>
+    <span id="quickBookingRange"></span>
+  </div>
+  <div id="quickBookingTables" class="quick-booking-tables"></div>
+  <div id="quickBookingHint" class="quick-booking-hint"></div>
+
+  <button id="quickBookingConfirm" class="btn-success full" type="button" onclick="confirmQuickBooking()">
+    确认并加入预约时间表
+  </button>
+</div>
 
 <div class="panel">
  <div class="section-toggle">
@@ -281,7 +329,7 @@
 </div>
 
 <script type="module">
-  import { renderNav } from "./js/nav.js?v=4.0.27";
+  import { renderNav } from "./js/nav.js?v=4.0.28";
 
   try {
     renderNav("booking");
@@ -289,7 +337,7 @@
     console.error("预约页面导航加载失败", error);
   }
 
-  import("./js/booking.js?v=4.0.27")
+  import("./js/booking.js?v=4.0.28")
     .catch(error => {
       console.error("booking.js 加载失败", error);
 

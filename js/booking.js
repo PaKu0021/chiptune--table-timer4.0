@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.27";
+﻿import { db } from "./firebase.js?v=4.0.28";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.27";
-import { resetTable } from "./common.js?v=4.0.27";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.27";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.27";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.28";
+import { resetTable } from "./common.js?v=4.0.28";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.28";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.28";
 
 const ref = doc(db, "shop", "main");
 let state = null;
@@ -76,6 +76,7 @@ let moveAreaRect = null;
 let dragFromCenter = null;
 let bookingAutoRefreshTimer = null;
 let runningTimeTextTimer = null;
+let quickBookingInitialized = false;
 
 
 const MOVE_LINE_COLORS = [
@@ -884,9 +885,10 @@ return `
   `;
 
 drawExistingBookings();
-drawRunningTables();
-updateBookingLockUI();
-startRunningTimeTextTimer();
+  drawRunningTables();
+  updateBookingLockUI();
+  renderQuickBookingForm();
+  startRunningTimeTextTimer();
 }
 
 function renderBookingGridPreservingScroll(){
@@ -976,6 +978,11 @@ function updateBookingLockUI(){
     grid.classList.toggle("locked-grid", bookingLocked);
     grid.classList.toggle("unlocked-grid", !bookingLocked);
   }
+
+  document.querySelectorAll(".quick-booking-panel input, .quick-booking-panel select, .quick-booking-panel button")
+    .forEach(control=>{
+      control.disabled = bookingLocked;
+    });
 }
 
 function toggleBookingLock(){
@@ -1215,6 +1222,267 @@ function findBookingConflicts({date, tableIndexes, startTime, endTime, excludeBo
     const endB = timeToMinutes(b.endTime);
     return startA < endB && endA > startB;
   });
+}
+
+const QUICK_BOOKING_TABLE_ZONES = [
+  [0,1,2,3],
+  [4,5,6,7],
+  [8,9],
+  [10,11],
+  [12,13]
+];
+
+function quickBookingEndTime(startTime, packageIndex){
+  const startMinutes = timeToMinutes(startTime);
+  const bookingPackage = state.packages?.[Number(packageIndex)] || {};
+  const closeMinutes = getBusinessHours().close * 60;
+  const duration = bookingPackage.unlimited
+    ? Math.max(0, closeMinutes - startMinutes)
+    : Math.max(SLOT_MINUTES, Number(bookingPackage.minutes || SLOT_MINUTES));
+  const endMinutes = Math.min(closeMinutes, startMinutes + duration);
+  return `${String(Math.floor(endMinutes / 60)).padStart(2,"0")}:${String(endMinutes % 60).padStart(2,"0")}`;
+}
+
+function getQuickBookingValues(){
+  const startTime = document.getElementById("quickBookingTime")?.value || "";
+  const packageIndex = Number(document.getElementById("quickBookingPackage")?.value || 0);
+  return {
+    startTime,
+    endTime:startTime ? quickBookingEndTime(startTime, packageIndex) : "",
+    packageIndex,
+    peopleCount:Math.max(1, Math.min(state.tables?.length || 14, Number(document.getElementById("quickBookingPeople")?.value || 1)))
+  };
+}
+
+function isQuickTableAvailable(tableIndex, startTime, endTime){
+  if(!startTime || !endTime) return true;
+  if(currentBookingDate === getTodayDate() && state.tables?.[tableIndex]?.start) return false;
+  return !hasBookingConflict(tableIndex, {
+    date:currentBookingDate,
+    startTime,
+    endTime
+  });
+}
+
+function quickTableCapacity(tableIndex){
+  return Number(tableIndex) >= 12 ? 1 : 2;
+}
+
+function renderQuickBookingForm(force = false){
+  const packageSelect = document.getElementById("quickBookingPackage");
+  const tableBox = document.getElementById("quickBookingTables");
+  const timeInput = document.getElementById("quickBookingTime");
+  if(!packageSelect || !tableBox || !timeInput || !state) return;
+
+  if(force || !quickBookingInitialized){
+    packageSelect.innerHTML = (state.packages || []).map((bookingPackage,index)=>`
+      <option value="${index}">
+        ${bookingPackage.name || "套餐"}｜${bookingPackage.unlimited ? "不限时" : `${bookingPackage.minutes || 0}分钟`}｜¥${Number(bookingPackage.price || 0).toLocaleString()}
+      </option>
+    `).join("");
+    const firstSlot = getSlots()[0] || "12:00";
+    if(!timeInput.value) timeInput.value = firstSlot;
+    quickBookingInitialized = true;
+  }
+
+  const selected = new Set(
+    [...tableBox.querySelectorAll("input:checked")].map(input=>Number(input.value))
+  );
+  const {startTime,endTime} = getQuickBookingValues();
+
+  tableBox.innerHTML = (state.tables || []).map((table,index)=>{
+    const available = isQuickTableAvailable(index,startTime,endTime);
+    const checked = available && selected.has(index);
+    return `
+      <label class="quick-table-choice ${checked ? "selected" : ""} ${available ? "" : "unavailable"}">
+        <input type="checkbox" value="${index}" ${checked ? "checked" : ""} ${available || bookingLocked ? "" : "disabled"} onchange="updateQuickBookingSelection()">
+        ${table.name || `${index + 1}号桌`}
+      </label>
+    `;
+  }).join("");
+
+  updateQuickBookingSelection();
+  updateBookingLockUI();
+}
+
+function refreshQuickBookingAvailability(){
+  renderQuickBookingForm();
+}
+
+function updateQuickBookingSelection(){
+  const checked = [...document.querySelectorAll("#quickBookingTables input:checked")];
+  document.querySelectorAll(".quick-table-choice").forEach(label=>{
+    label.classList.toggle("selected", Boolean(label.querySelector("input:checked")));
+  });
+  const {startTime,endTime} = getQuickBookingValues();
+  const range = document.getElementById("quickBookingRange");
+  if(range){
+    range.innerText = startTime && endTime ? `${startTime} - ${endTime}｜已选 ${checked.length}桌` : `已选 ${checked.length}桌`;
+  }
+}
+
+function findQuickBookingRecommendation(peopleCount, startTime, endTime){
+  const available = new Set(
+    (state.tables || [])
+      .map((_,index)=>index)
+      .filter(index=>isQuickTableAvailable(index,startTime,endTime))
+  );
+
+  // 单人优先使用 13、14 号单人桌，避免占用可坐两人的普通桌。
+  if(peopleCount === 1){
+    const single = QUICK_BOOKING_TABLE_ZONES[4].find(index=>available.has(index));
+    if(single !== undefined) return [single];
+  }
+
+  const preferredZones = peopleCount > 1
+    ? QUICK_BOOKING_TABLE_ZONES.slice(0,4)
+    : QUICK_BOOKING_TABLE_ZONES;
+
+  for(const zone of preferredZones){
+    for(let length = 1; length <= zone.length; length++){
+      for(let start = 0; start <= zone.length - length; start++){
+        const candidate = zone.slice(start,start + length);
+        const capacity = candidate.reduce((sum,index)=>sum + quickTableCapacity(index),0);
+        if(capacity >= peopleCount && candidate.every(index=>available.has(index))){
+          return candidate;
+        }
+      }
+    }
+  }
+
+  const selected = [];
+  let capacity = 0;
+  for(const zone of QUICK_BOOKING_TABLE_ZONES){
+    for(const index of zone){
+      if(available.has(index)){
+        selected.push(index);
+        capacity += quickTableCapacity(index);
+      }
+      if(capacity >= peopleCount) return selected;
+    }
+  }
+  return [];
+}
+
+function recommendQuickBookingTables(){
+  if(bookingLocked){
+    alert("请先解锁预约时间表");
+    return;
+  }
+  const {peopleCount,startTime,endTime} = getQuickBookingValues();
+  if(!startTime) return alert("请先输入到店时间");
+
+  renderQuickBookingForm();
+  const recommendation = findQuickBookingRecommendation(peopleCount,startTime,endTime);
+  document.querySelectorAll("#quickBookingTables input").forEach(input=>{
+    input.checked = recommendation.includes(Number(input.value));
+  });
+  updateQuickBookingSelection();
+
+  const hint = document.getElementById("quickBookingHint");
+  const recommendedCapacity = recommendation.reduce((sum,index)=>sum + quickTableCapacity(index),0);
+  if(hint){
+    hint.innerText = recommendedCapacity >= peopleCount
+      ? `已按 ${peopleCount} 人推荐：${recommendation.map(index=>state.tables[index]?.name).join("、")}`
+      : `当前时段没有足够容纳 ${peopleCount} 人的空闲桌位，请调整时间或手动选择。`;
+  }
+}
+
+async function confirmQuickBooking(){
+  if(bookingLocked) return alert("请先解锁预约时间表");
+
+  const button = document.getElementById("quickBookingConfirm");
+  if(button?.disabled) return;
+
+  const name = document.getElementById("quickBookingName")?.value.trim() || "";
+  const phone = String(document.getElementById("quickBookingPhone")?.value || "").replace(/\D/g,"").slice(-4);
+  const {startTime,endTime,packageIndex,peopleCount} = getQuickBookingValues();
+  const tableIndexes = [...document.querySelectorAll("#quickBookingTables input:checked")]
+    .map(input=>Number(input.value))
+    .filter(Number.isFinite);
+
+  if(!name) return alert("请输入客人姓名");
+  if(phone.length !== 4) return alert("请输入手机尾号后四位");
+  if(!startTime || !endTime || timeToMinutes(endTime) <= timeToMinutes(startTime)){
+    return alert("到店时间或套餐时长不正确");
+  }
+  if(tableIndexes.length === 0) return alert("请选择桌号，或点击“推荐邻近桌位”");
+  const selectedCapacity = tableIndexes.reduce((sum,index)=>sum + quickTableCapacity(index),0);
+  if(selectedCapacity < peopleCount){
+    return alert(`当前人数是 ${peopleCount} 人，所选桌位最多容纳 ${selectedCapacity} 人`);
+  }
+
+  const conflicts = findBookingConflicts({
+    date:currentBookingDate,
+    tableIndexes,
+    startTime,
+    endTime
+  });
+  if(conflicts.length){
+    renderQuickBookingForm();
+    return alert("所选桌位在这个时段已被占用，请重新选择桌号");
+  }
+
+  button.disabled = true;
+  button.innerText = "正在加入预约时间表…";
+  try{
+    const bookingId = Date.now();
+    const groupId = makeFastBookingGroupId(bookingId);
+    const groupColor = getNextBookingColor();
+    const booking = {
+      id:bookingId,
+      groupId,
+      groupColor,
+      groupName:"预约组",
+      date:currentBookingDate,
+      color:groupColor,
+      name,
+      phone,
+      peopleCount,
+      partySize:peopleCount,
+      tableIndexes,
+      startTime,
+      endTime,
+      packageIndex,
+      checkedIn:false,
+      checkInTime:null,
+      checkInTimeText:"",
+      cancelled:false,
+      source:"店内输入",
+      createdAt:Date.now()
+    };
+
+    createOrUpdateGroup({
+      groupId,
+      groupName:booking.groupName,
+      groupColor,
+      tableIndexes,
+      bookingId,
+      peopleCount
+    });
+    if(!Array.isArray(state.bookings)) state.bookings = [];
+    state.bookings.push(booking);
+
+    const saveTask = save("create_booking");
+    renderBookingGrid();
+    renderList();
+    document.getElementById("quickBookingName").value = "";
+    document.getElementById("quickBookingPhone").value = "";
+    document.querySelectorAll("#quickBookingTables input").forEach(input=>{ input.checked = false; });
+    updateQuickBookingSelection();
+    document.getElementById("quickBookingHint").innerText = "预约已加入时间表，并已保存在本机。";
+
+    saveTask.catch(error=>{
+      console.error("快速预约后台同步失败，将由本地队列继续重试",error);
+      setSyncStatus("pending","● 预约已保存在本机 · 云端上传将自动重试");
+    });
+  }catch(error){
+    console.error("快速输入预约失败",error);
+    alert("预约保存失败：" + (error?.message || String(error)));
+  }finally{
+    button.disabled = bookingLocked;
+    button.innerText = "确认并加入预约时间表";
+  }
 }
 
 function openMoveRunningTableModal(tableIndex){
@@ -3262,3 +3530,7 @@ window.autoAssignBookingTable = autoAssignBookingTable;
 window.openGroupPayment = openGroupPayment;
 window.closeGroupPayment = closeGroupPayment;
 window.confirmGroupPayment = confirmGroupPayment;
+window.recommendQuickBookingTables = recommendQuickBookingTables;
+window.refreshQuickBookingAvailability = refreshQuickBookingAvailability;
+window.updateQuickBookingSelection = updateQuickBookingSelection;
+window.confirmQuickBooking = confirmQuickBooking;

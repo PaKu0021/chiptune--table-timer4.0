@@ -143,9 +143,18 @@ button:active{
 }
 
 .card.compact-table-card.collapsed{
-  min-height:0;
+  align-self:start;
+  height:112px;
+  min-height:112px;
+  max-height:112px;
   padding:0;
   overflow:hidden;
+}
+
+.card.compact-table-card.expanded{
+  align-self:start;
+  height:auto;
+  max-height:none;
 }
 
 .card.compact-table-card.collapsed .table-card-details{

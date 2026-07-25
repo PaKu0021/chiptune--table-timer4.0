@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.19";
+import { db } from "./firebase.js?v=4.0.21";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.19";
-/*import { formatTime } from "./common.js?v=4.0.19";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.19";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.19";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.19";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.21";
+/*import { formatTime } from "./common.js?v=4.0.21";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.21";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.21";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.21";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -158,6 +158,7 @@ let runningMoveAreaRect = null;
 let editingPreMinutesIndex = null;
 let pendingRenderAfterInput = false;
 const preMinutesDrafts = {};
+const expandedTableCards = new Set();
 let tableInteractionHoldUntil = 0;
 
 
@@ -318,6 +319,7 @@ function normalizeAppState(nextState){
     if(t.groupName === undefined) t.groupName = "";
     if(t.groupColor === undefined) t.groupColor = "";
     if(t.activeColor === undefined) t.activeColor = "";
+    if(t.arrivalTimeDraft === undefined) t.arrivalTimeDraft = "";
 
     if(t.customPackage?.enabled){
       t.customPackage.enabled = false;
@@ -1118,11 +1120,26 @@ filteredTables.forEach(({t,i})=>{
     const preValue = editingPreMinutesIndex === i && preMinutesDrafts[i] !== undefined
       ? preMinutesDrafts[i]
       : Math.max(0,Math.floor(Number(t.preMinutes || 0)));
+    const isExpanded = expandedTableCards.has(i);
+    const arrivalValue = t.arrivalTimeDraft || (t.start ? formatClockTime(t.start) : "");
+    const groupLabel = t.groupId
+      ? `${t.groupName || "编组"} · ${t.groupId}`
+      : "未编组";
 
     const div = document.createElement("div");
-    div.className = "card " + status;
+    div.className = `card compact-table-card ${status} ${isExpanded ? "expanded" : "collapsed"}`;
 
     div.innerHTML = `
+      <button class="table-card-summary" type="button" onclick="toggleTableCard(${i})" aria-expanded="${isExpanded}">
+        <span class="table-card-summary-main">
+          <strong>${t.name}</strong>
+          <b>${timeText}</b>
+          <small>${groupLabel}</small>
+        </span>
+        <span class="table-card-chevron">${isExpanded ? "收起 ▲" : "展开 ▼"}</span>
+      </button>
+
+      <div class="table-card-details">
       <h3 class="table-title-row"><span>${t.name}</span>${(t.start || t.type || t.recordId) && t.groupId ? `<span class="table-group-id">${t.groupId}</span>` : ""}</h3>
 
     <select onpointerdown="beginTableInteraction()" onfocus="beginTableInteraction()" onchange="setPackage(${i},this.value);finishTableInteractionSoon()">
@@ -1165,6 +1182,9 @@ ${t.start ? `
 </div>
 
 <label style="display:block;margin:10px 0 8px;font-weight:700;color:#6f6659;">
+  <span style="display:block;margin-bottom:6px;">客人到店时间</span>
+  <input type="time" id="arrival-${i}" value="${arrivalValue}" onfocus="beginTableInteraction()" oninput="setArrivalTimeDraft(${i},this.value)" onchange="setArrivalTimeDraft(${i},this.value)" aria-label="客人到店时间">
+  <small style="display:block;margin:3px 0 10px;color:#8a8174;font-weight:600;">填写后优先按这个时间开始计算；留空则使用下面的提前分钟数。</small>
   <span style="display:block;margin-bottom:6px;">提前多少分钟</span>
   <input type="number" inputmode="numeric" min="0" max="1440" step="1" placeholder="输入提前分钟数" id="pre-${i}" value="${preValue}" onfocus="beginPreMinutesEdit(${i},this)" oninput="updatePreMinutes(${i},this.value)" onblur="commitPreMinutesEdit(${i},this.value)">
 </label>
@@ -1231,6 +1251,7 @@ ${t.start ? `
 </button>
 ` : ""}
 
+      </div>
     `;
 
     box.appendChild(div);
@@ -1441,6 +1462,59 @@ function normalizePreMinutes(value){
   return Math.min(1440,Math.floor(n));
 }
 
+function formatClockTime(timestamp){
+  const date = new Date(Number(timestamp));
+  if(!Number.isFinite(date.getTime())) return "";
+  return `${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`;
+}
+
+function setArrivalTimeDraft(i,value){
+  const t = state?.tables?.[i];
+  if(!t) return;
+  beginTableInteraction();
+  t.arrivalTimeDraft = String(value || "");
+}
+
+function getRequestedStartTime(i,t){
+  const arrivalValue = String(
+    document.getElementById("arrival-"+i)?.value ??
+    t.arrivalTimeDraft ??
+    ""
+  ).trim();
+
+  if(arrivalValue){
+    const match = arrivalValue.match(/^(\d{1,2}):(\d{2})$/);
+    if(!match) throw new Error("到店时间格式不正确，请重新选择时间");
+    const now = new Date();
+    const startTime = new Date(now);
+    startTime.setHours(Number(match[1]),Number(match[2]),0,0);
+    if(startTime.getTime() > now.getTime() + 60000){
+      // 凌晨营业仍属于前一营业日：例如凌晨 01:00 输入 23:30，
+      // 应理解为昨晚 23:30，而不是尚未到来的今晚。
+      if(now.getHours() < 6 && Number(match[1]) >= 6){
+        startTime.setDate(startTime.getDate() - 1);
+      }else{
+        throw new Error("到店时间不能晚于当前时间");
+      }
+    }
+    t.arrivalTimeDraft = arrivalValue;
+    t.preMinutes = Math.max(0,Math.floor((now.getTime() - startTime.getTime()) / 60000));
+    return startTime.getTime();
+  }
+
+  const preInput = document.getElementById("pre-"+i)?.value;
+  const pre = normalizePreMinutes(preInput ?? t.preMinutes);
+  t.preMinutes = pre;
+  t.arrivalTimeDraft = "";
+  return Date.now() - pre * 60000;
+}
+
+function toggleTableCard(i){
+  if(expandedTableCards.has(i)) expandedTableCards.delete(i);
+  else expandedTableCards.add(i);
+  render();
+}
+
 function isPreMinutesInput(el=document.activeElement){
   return Boolean(el?.id && /^pre-\d+$/.test(el.id));
 }
@@ -1482,7 +1556,9 @@ function shouldDeferTableRender(){
     return active.id !== "sortMode" && !active.id?.includes("Filter");
   }
   if(active.tagName !== "INPUT" && active.tagName !== "TEXTAREA") return false;
-  return /^name-\d+$/.test(active.id || "") || /^phone-\d+$/.test(active.id || "");
+  return /^name-\d+$/.test(active.id || "") ||
+    /^phone-\d+$/.test(active.id || "") ||
+    /^arrival-\d+$/.test(active.id || "");
 }
 
 function beginPreMinutesEdit(i,el){
@@ -1515,14 +1591,17 @@ async function start(i){
   // 已开始桌位：解锁后再次点击“开始”，只重新记录开始时间，
   // 不创建新账单、不重复收套餐费。
   if(t.start){
-    const preInput = document.getElementById("pre-"+i)?.value;
-    const pre = normalizePreMinutes(preInput ?? t.preMinutes);
-    const newStartTime = Date.now() - pre * 60000;
+    let newStartTime;
+    try{
+      newStartTime = getRequestedStartTime(i,t);
+    }catch(error){
+      alert(error?.message || "到店时间不正确");
+      return;
+    }
     const plannedEndAt = getPlannedTimerEndAt(t,newStartTime);
     // 实际计时与预约排期完全分离：调整真实开始时间时不修改预约，
     // 即使预计结束时间与后续预约重叠，也允许保存。
 
-    t.preMinutes = pre;
     t.start = newStartTime;
     t.startLocked = true;
     t.lastAction = "start_time_adjusted";
@@ -1570,10 +1649,14 @@ async function start(i){
   const before = JSON.parse(JSON.stringify(t));
   t.startLocked = true;
   ensureVisitAndRecordId(t);
-  const preInput = document.getElementById("pre-"+i)?.value;
-  const pre = normalizePreMinutes(preInput ?? t.preMinutes);
-  t.preMinutes = pre;
-  const startTime = Date.now() - pre * 60000;
+  let startTime;
+  try{
+    startTime = getRequestedStartTime(i,t);
+  }catch(error){
+    t.startLocked = false;
+    alert(error?.message || "到店时间不正确");
+    return;
+  }
   const plannedEndAt = getPlannedTimerEndAt(t,startTime);
   // 点击开始始终以当前真实时间（或店员明确补录的时间）开始。
   // 后续预约只用于提示，不阻止开始，也不会被移动或覆盖。
@@ -3461,6 +3544,8 @@ window.setPackage = setPackage;
 window.setWalkin = setWalkin;
 window.setBooking = setBooking;
 window.start = start;
+window.toggleTableCard = toggleTableCard;
+window.setArrivalTimeDraft = setArrivalTimeDraft;
 window.beginTableInteraction = beginTableInteraction;
 window.finishTableInteractionSoon = finishTableInteractionSoon;
 window.beginPreMinutesEdit = beginPreMinutesEdit;

@@ -141,12 +141,73 @@ button:active{
   background:var(--card);
 }
 
+.card.compact-table-card.collapsed{
+  min-height:0;
+  padding:0;
+  overflow:hidden;
+}
+
+.card.compact-table-card.collapsed .table-card-details{
+  display:none;
+}
+
+.table-card-summary{
+  width:100%;
+  min-height:112px;
+  margin:0;
+  padding:16px 18px;
+  border:0;
+  border-radius:22px;
+  background:transparent;
+  color:var(--text);
+  box-shadow:none;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  text-align:left;
+}
+
+.table-card-summary-main{
+  min-width:0;
+  display:grid;
+  gap:5px;
+}
+
+.table-card-summary strong{
+  font-size:24px;
+}
+
+.table-card-summary b{
+  font-size:20px;
+}
+
+.table-card-summary small{
+  color:#756d62;
+  font-size:13px;
+  font-weight:800;
+  overflow-wrap:anywhere;
+}
+
+.table-card-chevron{
+  flex:0 0 auto;
+  color:#2b6fc9;
+  font-weight:900;
+}
+
+.card.compact-table-card.expanded .table-card-summary{
+  min-height:82px;
+  margin-bottom:12px;
+  border-bottom:1px solid rgba(120,100,70,.18);
+  border-radius:16px 16px 0 0;
+}
+
 .card.idle{
   background:#f1f1f1;
 }
 
 .card.using{
-  background:#fff7d6;
+  background:#f8d451;
 }
 
 .card.warning{

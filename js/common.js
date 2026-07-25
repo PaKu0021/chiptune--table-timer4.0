@@ -28,6 +28,7 @@ export function resetTable(name){
     start:null,
     extra:0,
     preMinutes:0,
+    arrivalTimeDraft:"",
 
     packageIndex:0,
     customPackage:{

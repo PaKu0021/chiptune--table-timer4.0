@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.19";
+﻿import { db } from "./firebase.js?v=4.0.21";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.19";
-import { resetTable } from "./common.js?v=4.0.19";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.19";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.19";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.21";
+import { resetTable } from "./common.js?v=4.0.21";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.21";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.21";
 
 const ref = doc(db, "shop", "main");
 let state = null;

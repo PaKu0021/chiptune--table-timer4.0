@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.25";
+import { db } from "./firebase.js?v=4.0.26";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.25";
-/*import { formatTime } from "./common.js?v=4.0.25";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.25";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.25";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.25";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.26";
+/*import { formatTime } from "./common.js?v=4.0.26";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.26";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.26";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.26";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -1791,22 +1791,27 @@ async function start(i){
       }
     }
 
-    // 开始后的预约签到、组资料必须真正落盘完成后才允许显示“已同步”。
-    // 用户立刻返回首页时，首页因此能够读到同一份运行状态。
-    await saveStateSafely({
+    /*
+     * atomicStartTable 已经在同一云端事务中提交了本桌和进行中账单。
+     * 这里不能再等待整个历史队列，否则数百项旧账单会让一次单桌开始
+     * 长时间停留在“同步中”。组资料、预约签到和账单附加字段先同步写入
+     * 本机应急影子，再由后台队列补传；此刻即可安全切换页面。
+     */
+    emergencySaveState({
       db,
       ref,
-      getState:()=>state,
+      state,
       action:"start_table_post_transaction"
     });
-    await createOrUpdateRecord(state.tables[i]);
-    try{
-      await flushPending({db,ref});
-      setSyncStatus(result?.cloudPending ? "pending" : "synced",result?.cloudPending ? "● 已保存本机 · 云端同步等待重试" : "● 已同步");
-    }catch(syncError){
-      console.warn("开始后的云端同步失败，将继续重试",syncError);
-      setSyncStatus("pending",`● 已保存本机 · 云端同步等待重试：${syncError?.code || syncError?.message || syncError}`);
-    }
+    createOrUpdateRecord(state.tables[i]).catch(syncError=>{
+      console.warn("开始后的账单附加信息将在后台继续同步",syncError);
+    });
+    setSyncStatus(
+      result?.cloudPending ? "pending" : "synced",
+      result?.cloudPending
+        ? "● 本桌已保存在本机 · 云端等待重试"
+        : "● 本桌与账单已同步 · 可切换页面"
+    );
     render();
 
     // 仅提醒实际计时可能与后续预约重叠；不截断计时，也不改预约时间。

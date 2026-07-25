@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.28";
+﻿import { db } from "./firebase.js?v=4.0.29";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.28";
-import { resetTable } from "./common.js?v=4.0.28";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.28";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.28";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.29";
+import { resetTable } from "./common.js?v=4.0.29";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.29";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.29";
 
 const ref = doc(db, "shop", "main");
 let state = null;
@@ -77,6 +77,7 @@ let dragFromCenter = null;
 let bookingAutoRefreshTimer = null;
 let runningTimeTextTimer = null;
 let quickBookingInitialized = false;
+let quickBookingOpen = false;
 
 
 const MOVE_LINE_COLORS = [
@@ -979,7 +980,7 @@ function updateBookingLockUI(){
     grid.classList.toggle("unlocked-grid", !bookingLocked);
   }
 
-  document.querySelectorAll(".quick-booking-panel input, .quick-booking-panel select, .quick-booking-panel button")
+  document.querySelectorAll("#quickBookingBody input, #quickBookingBody select, #quickBookingBody button")
     .forEach(control=>{
       control.disabled = bookingLocked;
     });
@@ -1303,6 +1304,20 @@ function renderQuickBookingForm(force = false){
 
   updateQuickBookingSelection();
   updateBookingLockUI();
+}
+
+function toggleQuickBookingPanel(){
+  quickBookingOpen = !quickBookingOpen;
+  const body = document.getElementById("quickBookingBody");
+  const button = document.getElementById("quickBookingToggleBtn");
+  const help = document.getElementById("quickBookingHelp");
+  if(body) body.style.display = quickBookingOpen ? "block" : "none";
+  if(button) button.innerText = quickBookingOpen ? "收起 ▲" : "展开 ▼";
+  if(help){
+    help.innerText = quickBookingOpen
+      ? "选择当前日期的到店时间和套餐，系统会优先推荐相邻桌位，也可以手动选择桌号。"
+      : "需要录入预约时点开填写";
+  }
 }
 
 function refreshQuickBookingAvailability(){
@@ -3534,3 +3549,4 @@ window.recommendQuickBookingTables = recommendQuickBookingTables;
 window.refreshQuickBookingAvailability = refreshQuickBookingAvailability;
 window.updateQuickBookingSelection = updateQuickBookingSelection;
 window.confirmQuickBooking = confirmQuickBooking;
+window.toggleQuickBookingPanel = toggleQuickBookingPanel;

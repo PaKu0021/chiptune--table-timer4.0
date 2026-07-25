@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.26";
-import { RMB_PER_JPY } from "./business-day.js?v=4.0.26";
+﻿import { db } from "./firebase.js?v=4.0.27";
+import { RMB_PER_JPY } from "./business-day.js?v=4.0.27";
 
 import { doc, onSnapshot, collection, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.26";
-import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.26";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.27";
+import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.27";
 
 const ref = doc(db,"shop","main");
 const recordsRef = collection(db,"records");
@@ -30,6 +30,8 @@ window.addEventListener("chiptune-online-change",e=>{
 
 let currentFilter = "today";
 let currencyMode = "CONVERTED";
+let selectedChartDate = "";
+let chartHitPoints = [];
 let packagePanelOpen = false;
 let records = [];
 loadLocalRecords().then(localRecords=>{
@@ -603,6 +605,8 @@ function renderSummary(){
 function renderChart(){
   const canvas = document.getElementById("chart");
   if(!canvas) return;
+  chartHitPoints = [];
+  canvas.onclick = null;
 
   const panel = canvas.closest(".panel");
   const availableWidth = Math.max(320, Math.floor((panel?.clientWidth || window.innerWidth) - 48));
@@ -702,6 +706,7 @@ function renderChart(){
     x:labels.length === 1 ? padL + w/2 : padL + i*(w/(labels.length-1)),
     y:padT + h - (values[i]/yMax)*h
   }));
+  chartHitPoints = points.map(point=>({...point,cssWidth,cssHeight}));
 
   // 轻微面积填充，让走势更容易辨认。
   const gradient = ctx.createLinearGradient(0,padT,0,padT+h);
@@ -725,13 +730,20 @@ function renderChart(){
 
   const minLabelGap = 34;
   points.forEach((point,i)=>{
+    const selected = selectedChartDate === point.label;
+    if(selected){
+      ctx.fillStyle = "rgba(43,111,201,.18)";
+      ctx.beginPath();
+      ctx.arc(point.x,point.y,12,0,Math.PI*2);
+      ctx.fill();
+    }
     ctx.fillStyle = "#332d24";
     ctx.beginPath();
-    ctx.arc(point.x,point.y,5,0,Math.PI*2);
+    ctx.arc(point.x,point.y,selected ? 7 : 5,0,Math.PI*2);
     ctx.fill();
 
-    ctx.strokeStyle = "#fffaf1";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = selected ? "#2b6fc9" : "#fffaf1";
+    ctx.lineWidth = selected ? 3 : 2;
     ctx.stroke();
 
     const isNearTop = point.y < padT + 28;
@@ -759,6 +771,26 @@ function renderChart(){
   });
 
   ctx.textAlign = "left";
+
+  canvas.onclick = event=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * (cssWidth / rect.width);
+    const y = (event.clientY - rect.top) * (cssHeight / rect.height);
+    let nearest = null;
+    let nearestDistance = Infinity;
+    for(const point of chartHitPoints){
+      const distance = Math.hypot(point.x-x,point.y-y);
+      if(distance < nearestDistance){
+        nearest = point;
+        nearestDistance = distance;
+      }
+    }
+    if(!nearest || nearestDistance > 32) return;
+    selectedChartDate = nearest.label;
+    renderChart();
+    renderRecords();
+    document.getElementById("recordsPanel")?.scrollIntoView({behavior:"smooth",block:"start"});
+  };
 }
 
 let chartResizeTimer = null;
@@ -805,9 +837,24 @@ function renderPackages(){
 }
 
 function renderRecords(){
-  const rows = [...getFilteredRecords()].reverse();
+  const rows = getFilteredRecords()
+    .filter(r=>!selectedChartDate || getRecordBusinessDate(r) === selectedChartDate)
+    .reverse();
+  const title = document.getElementById("recordsTitle");
+  const note = document.getElementById("recordDateFilterNote");
+  if(title){
+    title.innerText = selectedChartDate
+      ? `${selectedChartDate} 收银记录`
+      : "收银记录";
+  }
+  if(note){
+    note.style.display = selectedChartDate ? "flex" : "none";
+    note.innerHTML = selectedChartDate
+      ? `<span>当前显示营业日：${selectedChartDate}（${rows.length}笔）</span><button class="btn-ghost" type="button" onclick="clearChartDateFilter()">显示当前范围全部记录</button>`
+      : "";
+  }
 
-  document.getElementById("records").innerHTML = rows.map(r=>{
+  document.getElementById("records").innerHTML = rows.length ? rows.map(r=>{
     const table = r.tableName || r.table || "";
     const name = r.customerName || r.name || "";
     const phone = r.phoneLast4 || "";
@@ -861,7 +908,7 @@ function renderRecords(){
 </td>
       </tr>
     `;
-  }).join("");
+  }).join("") : `<tr><td colspan="15">该营业日暂无收银记录</td></tr>`;
 
 }
 
@@ -1327,7 +1374,14 @@ function exportCSV(){
 
 function setFilter(v){
   currentFilter = v;
+  selectedChartDate = "";
   render();
+}
+
+function clearChartDateFilter(){
+  selectedChartDate = "";
+  renderChart();
+  renderRecords();
 }
 
 function setCurrencyMode(v){
@@ -1428,6 +1482,7 @@ window.logoutOwner = logoutOwner;
 window.saveBusinessHours = saveBusinessHours;
 window.togglePackagePanel = togglePackagePanel;
 window.setFilter = setFilter;
+window.clearChartDateFilter = clearChartDateFilter;
 window.setCurrencyMode = setCurrencyMode;
 window.addPackage = addPackage;
 window.removePackage = removePackage;

@@ -1559,6 +1559,20 @@ button.selected-pop{
   background:#fff;
   border-radius:16px;
   touch-action:pan-y;
+  cursor:pointer;
+}
+
+.record-date-filter-note{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin:0 0 14px;
+  padding:10px 12px;
+  border-radius:12px;
+  background:#eef5ff;
+  color:#245ca6;
+  font-weight:800;
 }
 
 

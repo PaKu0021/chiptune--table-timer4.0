@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.30";
+﻿import { db } from "./firebase.js?v=4.0.31";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.30";
-import { resetTable } from "./common.js?v=4.0.30";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.30";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.30";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.31";
+import { resetTable } from "./common.js?v=4.0.31";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.31";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.31";
 
 const ref = doc(db, "shop", "main");
 let state = null;
@@ -1231,9 +1231,12 @@ const QUICK_BOOKING_TABLE_ZONES = [
 
 function quickBookingEndTime(startTime, packageIndex){
   const startMinutes = timeToMinutes(startTime);
-  const bookingPackage = state.packages?.[Number(packageIndex)] || {};
+  const noPackage = Number(packageIndex) < 0;
+  const bookingPackage = noPackage ? {} : (state.packages?.[Number(packageIndex)] || {});
   const closeMinutes = getBusinessHours().close * 60;
-  const duration = bookingPackage.unlimited
+  const duration = noPackage
+    ? 180
+    : bookingPackage.unlimited
     ? Math.max(0, closeMinutes - startMinutes)
     : Math.max(SLOT_MINUTES, Number(bookingPackage.minutes || SLOT_MINUTES));
   const endMinutes = Math.min(closeMinutes, startMinutes + duration);
@@ -1242,7 +1245,10 @@ function quickBookingEndTime(startTime, packageIndex){
 
 function getQuickBookingValues(){
   const startTime = document.getElementById("quickBookingTime")?.value || "";
-  const packageIndex = Number(document.getElementById("quickBookingPackage")?.value || 0);
+  const rawPackageIndex = document.getElementById("quickBookingPackage")?.value;
+  const packageIndex = rawPackageIndex === "" || rawPackageIndex === "-1"
+    ? -1
+    : Number(rawPackageIndex || 0);
   return {
     startTime,
     endTime:startTime ? quickBookingEndTime(startTime, packageIndex) : "",
@@ -1265,6 +1271,13 @@ function quickTableCapacity(tableIndex){
   return Number(tableIndex) >= 12 ? 1 : 2;
 }
 
+function getDefaultBookingPackageIndex(){
+  const threeHourIndex = (state.packages || []).findIndex(bookingPackage=>
+    !bookingPackage?.unlimited && Number(bookingPackage?.minutes || 0) === 180
+  );
+  return threeHourIndex >= 0 ? threeHourIndex : 0;
+}
+
 function renderQuickBookingForm(force = false){
   const packageSelect = document.getElementById("quickBookingPackage");
   const tableBox = document.getElementById("quickBookingTables");
@@ -1272,11 +1285,15 @@ function renderQuickBookingForm(force = false){
   if(!packageSelect || !tableBox || !timeInput || !state) return;
 
   if(force || !quickBookingInitialized){
-    packageSelect.innerHTML = (state.packages || []).map((bookingPackage,index)=>`
+    packageSelect.innerHTML = `
+      <option value="-1">不选择套餐｜默认预留3小时</option>
+    ` + (state.packages || []).map((bookingPackage,index)=>`
       <option value="${index}">
         ${bookingPackage.name || "套餐"}｜${bookingPackage.unlimited ? "不限时" : `${bookingPackage.minutes || 0}分钟`}｜¥${Number(bookingPackage.price || 0).toLocaleString()}
       </option>
     `).join("");
+    const defaultPackageIndex = getDefaultBookingPackageIndex();
+    packageSelect.value = String((state.packages || []).length ? defaultPackageIndex : -1);
     const firstSlot = getSlots()[0] || "12:00";
     if(!timeInput.value) timeInput.value = firstSlot;
     quickBookingInitialized = true;
@@ -1448,7 +1465,8 @@ async function confirmQuickBooking(){
       tableIndexes,
       startTime,
       endTime,
-      packageIndex,
+      packageIndex:packageIndex >= 0 ? packageIndex : null,
+      noPackage:packageIndex < 0,
       checkedIn:false,
       checkInTime:null,
       checkInTimeText:"",
@@ -2742,7 +2760,7 @@ function drawExistingBookings(){
   const slots = getSlots();
 
   const dayBookings = (state.bookings || []).filter(b=>{
-    return (b.date || currentBookingDate) === currentBookingDate;
+    return !b?.cancelled && (b.date || currentBookingDate) === currentBookingDate;
   });
 
   dayBookings.forEach(b=>{
@@ -2753,16 +2771,20 @@ function drawExistingBookings(){
       .map(Number)
       .filter(i=>!finished.includes(i));
 
-    const startRow = slots.indexOf(b.startTime);
-    let endRow = slots.indexOf(b.endTime);
+    const bookingStart = timeToMinutes(b.startTime);
+    const bookingEnd = timeToMinutes(b.endTime);
+    const occupiedRows = slots.slice(0,-1)
+      .map((slotTime,rowIndex)=>{
+        const slotStart = timeToMinutes(slotTime);
+        const slotEnd = timeToMinutes(slots[rowIndex + 1]);
+        return bookingStart < slotEnd && bookingEnd > slotStart ? rowIndex : -1;
+      })
+      .filter(rowIndex=>rowIndex >= 0);
 
-    if(startRow < 0) return;
+    if(!occupiedRows.length) return;
 
-    if(endRow < 0 && b.endTime === `${getBusinessHours().close}:00`){
-      endRow = slots.length;
-    }
-
-    const realEndRow = endRow > startRow ? endRow : startRow + 1;
+    const startRow = occupiedRows[0];
+    const realEndRow = occupiedRows[occupiedRows.length - 1] + 1;
     const baseColor = b.color || "#B7E4C7";
     const bgColor = b.checkedIn ? darkenColor(baseColor, 35) : baseColor;
 
@@ -2947,10 +2969,11 @@ function getBookingById(id){
 }
 
 function getBookingDetailDraft(){
+  const rawPackageIndex = document.getElementById("detailPackage")?.value;
   return {
     name: document.getElementById("detailName")?.value.trim() || "",
     phone: document.getElementById("detailPhone")?.value.trim() || "",
-    packageIndex: Number(document.getElementById("detailPackage")?.value || 0)
+    packageIndex:rawPackageIndex === "-1" ? null : Number(rawPackageIndex || 0)
   };
 }
 
@@ -2958,7 +2981,9 @@ function getBookingDetailSnapshot(booking){
   return JSON.stringify({
     name: booking?.name || "",
     phone: booking?.phone || "",
-    packageIndex: Number(booking?.packageIndex || 0)
+    packageIndex:booking?.packageIndex === null || booking?.packageIndex === undefined
+      ? null
+      : Number(booking.packageIndex)
   });
 }
 
@@ -2992,9 +3017,11 @@ function openBookingAction(id){
     </div>
   `;
 
+  const noPackageSelected = b.packageIndex === null || b.packageIndex === undefined || b.noPackage;
   document.getElementById("detailPackage").innerHTML =
+    `<option value="-1" ${noPackageSelected ? "selected" : ""}>不选择套餐</option>` +
     (state.packages || []).map((p,i)=>`
-      <option value="${i}" ${Number(b.packageIndex || 0) === i ? "selected" : ""}>
+      <option value="${i}" ${!noPackageSelected && Number(b.packageIndex) === i ? "selected" : ""}>
         ${p.name}｜${p.unlimited ? "不限时" : p.minutes + "分钟"}｜¥${p.price}
       </option>
     `).join("");
@@ -3016,6 +3043,7 @@ async function saveBookingDetail(options = {}){
   b.name = draft.name;
   b.phone = draft.phone;
   b.packageIndex = draft.packageIndex;
+  b.noPackage = draft.packageIndex === null;
 
   indexes.forEach(idx=>{
     const t = state.tables[idx];
@@ -3173,7 +3201,9 @@ async function confirmCheckInSelected(){
       paidJPY:0,
       paidRMB:0,
       paidAt:null,
-      packageIndex:Number(b.packageIndex || 0),
+      packageIndex:b.packageIndex === null || b.packageIndex === undefined
+        ? getDefaultBookingPackageIndex()
+        : Number(b.packageIndex),
       customer:{
         name:b.name || "",
         phoneLast4:String(b.phone || "").slice(-4)

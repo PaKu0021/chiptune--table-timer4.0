@@ -1159,15 +1159,29 @@ function arrayMapById(list,prefix){
   (Array.isArray(list)?list:[]).forEach((v,i)=>map.set(itemId(v,i,prefix),v));
   return map;
 }
-async function pendingForEntity(type,id){
-  const items=await queueAll("queue");
-  return items.filter(x=>(x.syncV4 || x.syncV3) && x.entityType===type && String(x.entityId)===String(id)).sort((a,b)=>a.createdAt-b.createdAt);
+async function pendingForEntity(type,id,items=null){
+  const queueItems=Array.isArray(items) ? items : await queueAll("queue");
+  return queueItems.filter(x=>(x.syncV4 || x.syncV3)
+    && x.entityType===type
+    && (
+      String(x.logicalId ?? "")===String(id)
+      || String(x.entityId)===String(id)
+      || (type==="table" && Number(x.tableIndex)===Number(id))
+    )
+  ).sort((a,b)=>a.createdAt-b.createdAt);
 }
-async function makeEntityOperation({type,id,index,next,base,action,deleted=false}){
-  const pending=await pendingForEntity(type,id);
+async function makeEntityOperation({type,id,index,next,base,action,deleted=false,pendingItems=null}){
+  const pending=await pendingForEntity(type,id,pendingItems);
   const previous=pending.length ? pending[pending.length-1] : null;
-  const effectiveBase=previous?.nextEntity || base || null;
-  const baseVersion=previous ? Number(previous.expectedVersion||0)+1 : Number(entityMeta(base).version||0);
+  /*
+   * 同一实体尚未上传时，只保留“最早云端基线 → 最新本机状态”这一项。
+   * 例如连续点击套餐、付款方式、开始时间，以前会生成多次 Firestore
+   * 事务；现在无论改多少次，最终只需要上传一次。
+   */
+  const effectiveBase=previous?.baseEntity || base || null;
+  const baseVersion=previous
+    ? Number(previous.expectedVersion||0)
+    : Number(entityMeta(base).version||0);
   const operationId=crypto.randomUUID ? crypto.randomUUID() : `${getDeviceId()}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   return {
     id:operationId,
@@ -1185,16 +1199,19 @@ async function makeEntityOperation({type,id,index,next,base,action,deleted=false
     deleted:Boolean(deleted),
     createdAt:Date.now(),
     deviceId:getDeviceId(),
-    retryCount:0
+    retryCount:0,
+    supersededOperationIds:pending.map(item=>String(item.id))
   };
 }
 async function enqueueEntityOperations(local,base,action){
   const ops=[];
+  // 一次保存只读一次队列；多桌同时修改时避免反复打开 IndexedDB。
+  const pendingItems=await queueAll("queue");
   const changed=changedKeys(local,base);
   if(changed.includes("tables")){
     const max=Math.max(local?.tables?.length||0,base?.tables?.length||0);
     for(let i=0;i<max;i++) if(!same(local?.tables?.[i],base?.tables?.[i])){
-      ops.push(await makeEntityOperation({type:"table",id:i,index:i,next:local?.tables?.[i]||{},base:base?.tables?.[i]||{},action}));
+      ops.push(await makeEntityOperation({type:"table",id:i,index:i,next:local?.tables?.[i]||{},base:base?.tables?.[i]||{},action,pendingItems}));
     }
   }
   for(const [key,type,prefix] of [["bookings","booking","booking"],["groups","group","group"]]){
@@ -1204,7 +1221,7 @@ async function enqueueEntityOperations(local,base,action){
     for(const id of ids){
       const lv=lm.get(id), bv=bm.get(id);
       if(same(lv,bv)) continue;
-      ops.push(await makeEntityOperation({type,id,next:lv,base:bv,action,deleted:!lv}));
+      ops.push(await makeEntityOperation({type,id,next:lv,base:bv,action,deleted:!lv,pendingItems}));
     }
   }
   if(changed.includes("customers")){
@@ -1212,7 +1229,7 @@ async function enqueueEntityOperations(local,base,action){
     const ids=new Set([...Object.keys(lm),...Object.keys(bm)]);
     for(const id of ids){
       if(same(lm[id],bm[id])) continue;
-      ops.push(await makeEntityOperation({type:"customer",id,next:lm[id],base:bm[id],action,deleted:!lm[id]}));
+      ops.push(await makeEntityOperation({type:"customer",id,next:lm[id],base:bm[id],action,deleted:!lm[id],pendingItems}));
     }
   }
   const entityKeys=new Set(["tables","bookings","groups","customers"]);
@@ -1222,7 +1239,13 @@ async function enqueueEntityOperations(local,base,action){
     const operationId=crypto.randomUUID ? crypto.randomUUID() : `${getDeviceId()}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     ops.push({id:operationId,syncV4:true,entityType:"shopMeta",entityId:"main",action,command:"PATCH",patch:metaPatch,baseEntity:{},nextEntity:metaPatch,expectedVersion:stateRevision(base),createdAt:Date.now(),deviceId:getDeviceId(),retryCount:0});
   }
-  for(const op of ops) await queuePut("queue",op);
+  for(const op of ops){
+    for(const oldId of op.supersededOperationIds || []){
+      await queueDelete("queue",oldId);
+    }
+    delete op.supersededOperationIds;
+    await queuePut("queue",op);
+  }
   return ops;
 }
 function hasPatchConflict(remote,base,patch){
@@ -1320,21 +1343,47 @@ async function enqueueRecordOperations(next,previous){
   const recordId=String(next.id);
   const now=Date.now();
   const deviceId=getDeviceId();
+  // 队列只读取一次；iPad 的 IndexedDB 较慢，不能为每条付款重复 getAll()。
+  const queuedRecordOperations=await queueAll("recordQueue");
   const prev=normalizeRecordPayments(previous||{id:recordId,payments:[]});
   const normalized=normalizeRecordPayments(next);
   const {payments:_nextPayments,...nextMeta}=normalized;
   const {payments:_prevPayments,...prevMeta}=prev;
   const recordPatch=shallowPatch(nextMeta,prevMeta);
   if(Object.keys(recordPatch).length){
+    const pending=queuedRecordOperations
+      .filter(item=>item?.type==="record_patch" && String(item.recordId)===recordId)
+      .sort((a,b)=>a.createdAt-b.createdAt);
+    const first=pending[0] || null;
     const recordOpId=crypto.randomUUID?crypto.randomUUID():`record_${recordId}_${now}`;
-    await queuePut("recordQueue",{id:recordOpId,syncV4:true,type:"record_patch",recordId,patch:recordPatch,baseRecord:clone(prev),expectedVersion:Number(prev.version||prev?._recordSync?.version||0),createdAt:now,deviceId});
+    const rawBase=clone(first?.baseRecord || prev);
+    const {payments:_basePayments,...baseRecord}=rawBase;
+    for(const item of pending) await queueDelete("recordQueue",item.id);
+    await queuePut("recordQueue",{
+      id:recordOpId,
+      syncV4:true,
+      type:"record_patch",
+      recordId,
+      patch:shallowPatch(nextMeta,baseRecord),
+      baseRecord,
+      expectedVersion:first
+        ? Number(first.expectedVersion||0)
+        : Number(prev.version||prev?._recordSync?.version||0),
+      createdAt:now,
+      deviceId
+    });
   }
   const pm=new Map(prev.payments.map(x=>[String(x.id),x]));
   const nm=new Map(normalized.payments.map(x=>[String(x.id),x]));
   for(const [id,payment] of nm){
     const old=pm.get(id);
     if(same(payment,old)) continue;
+    const pending=queuedRecordOperations
+      .filter(item=>item?.type==="payment_upsert"
+        && String(item.recordId)===recordId
+        && String(item.paymentId)===String(id));
     const opId=crypto.randomUUID?crypto.randomUUID():`payment_${id}_${Date.now()}`;
+    for(const item of pending) await queueDelete("recordQueue",item.id);
     await queuePut("recordQueue",{id:opId,syncV4:true,type:"payment_upsert",recordId,paymentId:id,payment:clone(payment),basePayment:clone(old||{}),createdAt:Date.now(),deviceId});
   }
   for(const [id,old] of pm){
@@ -1414,7 +1463,14 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   let nextQueueIndex = 0;
   let completed = 0;
   let fatalError = null;
-  const workerCount = Math.min(4,queues.length);
+  /*
+   * 不同账单使用不同 Firestore 文档，不存在互相覆盖，允许更高并发。
+   * 同一账单仍严格串行。桌面端使用 10 路，Apple 触屏设备控制在 6 路，
+   * 避免 Safari 长轮询连接过多反而变慢。
+   */
+  const appleTouch = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const workerCount = Math.min(appleTouch ? 6 : 10,queues.length);
 
   const worker = async()=>{
     while(!fatalError && navigator.onLine){
@@ -1593,14 +1649,16 @@ export function saveStateSafely({
       setSyncStatus("pending","● 已保存本机 · 正在确认云端同步");
     }
     if(navigator.onLine){
-      // 在线操作立即同步，不再等延迟计时器。这样手机、iPad 和二维码页面
-      // 都能在几乎同一时间收到桌位状态更新。
-      try{
-        await flushPending({db,ref});
-      }catch(err){
+      /*
+       * 上传必须脱离 saveQueue。旧实现会 await 整个历史队列，导致前面有
+       * 数百条账单时，下一次点击也要排队等待，表现为页面无法操作。
+       * 本机影子和操作队列已经保存成功，因此立即返回；云端在后台刷新。
+       */
+      clearTimeout(flushTimer);
+      flushTimer=setTimeout(()=>flushPending({db,ref}).catch(err=>{
         console.warn("云端同步失败，将自动重试",err);
         setSyncStatus("error",`● 云端同步失败：${err?.code || err?.message || err}`);
-      }
+      }),0);
     }
     return local;
   }).catch(err=>{

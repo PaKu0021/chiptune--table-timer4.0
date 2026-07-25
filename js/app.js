@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.22";
+import { db } from "./firebase.js?v=4.0.23";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.22";
-/*import { formatTime } from "./common.js?v=4.0.22";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.22";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.22";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.22";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.23";
+/*import { formatTime } from "./common.js?v=4.0.23";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.23";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.23";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.23";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -159,6 +159,12 @@ let editingPreMinutesIndex = null;
 let pendingRenderAfterInput = false;
 const preMinutesDrafts = {};
 const expandedTableCards = new Set();
+const requestedTableMatch = String(location.hash || "").match(/^#table-(\d+)$/);
+const requestedTableIndex = requestedTableMatch ? Number(requestedTableMatch[1]) - 1 : null;
+let requestedTableFocused = false;
+if(Number.isInteger(requestedTableIndex) && requestedTableIndex >= 0){
+  expandedTableCards.add(requestedTableIndex);
+}
 let tableInteractionHoldUntil = 0;
 
 
@@ -1127,6 +1133,7 @@ filteredTables.forEach(({t,i})=>{
       : "未编组";
 
     const div = document.createElement("div");
+    div.id = `table-card-${i + 1}`;
     div.className = `card compact-table-card ${status} ${isExpanded ? "expanded" : "collapsed"}`;
 
     div.innerHTML = `
@@ -1255,6 +1262,12 @@ ${t.start ? `
     `;
 
     box.appendChild(div);
+    if(i === requestedTableIndex && !requestedTableFocused){
+      requestedTableFocused = true;
+      requestAnimationFrame(()=>{
+        div.scrollIntoView({behavior:"smooth",block:"start",inline:"nearest"});
+      });
+    }
     generateQR(i);
   });
 
@@ -1510,8 +1523,9 @@ function getRequestedStartTime(i,t){
 }
 
 function toggleTableCard(i){
-  if(expandedTableCards.has(i)) expandedTableCards.delete(i);
-  else expandedTableCards.add(i);
+  const wasExpanded = expandedTableCards.has(i);
+  expandedTableCards.clear();
+  if(!wasExpanded) expandedTableCards.add(i);
   render();
 }
 

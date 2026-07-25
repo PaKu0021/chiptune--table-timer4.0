@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.29";
+﻿import { db } from "./firebase.js?v=4.0.30";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.29";
-import { resetTable } from "./common.js?v=4.0.29";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.29";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.29";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.30";
+import { resetTable } from "./common.js?v=4.0.30";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.30";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.30";
 
 const ref = doc(db, "shop", "main");
 let state = null;
@@ -980,10 +980,6 @@ function updateBookingLockUI(){
     grid.classList.toggle("unlocked-grid", !bookingLocked);
   }
 
-  document.querySelectorAll("#quickBookingBody input, #quickBookingBody select, #quickBookingBody button")
-    .forEach(control=>{
-      control.disabled = bookingLocked;
-    });
 }
 
 function toggleBookingLock(){
@@ -1296,7 +1292,7 @@ function renderQuickBookingForm(force = false){
     const checked = available && selected.has(index);
     return `
       <label class="quick-table-choice ${checked ? "selected" : ""} ${available ? "" : "unavailable"}">
-        <input type="checkbox" value="${index}" ${checked ? "checked" : ""} ${available || bookingLocked ? "" : "disabled"} onchange="updateQuickBookingSelection()">
+        <input type="checkbox" value="${index}" ${checked ? "checked" : ""} ${available ? "" : "disabled"} onchange="updateQuickBookingSelection()">
         ${table.name || `${index + 1}号桌`}
       </label>
     `;
@@ -1315,8 +1311,8 @@ function toggleQuickBookingPanel(){
   if(button) button.innerText = quickBookingOpen ? "收起 ▲" : "展开 ▼";
   if(help){
     help.innerText = quickBookingOpen
-      ? "选择当前日期的到店时间和套餐，系统会优先推荐相邻桌位，也可以手动选择桌号。"
-      : "需要录入预约时点开填写";
+      ? "无需解锁时间表；选择到店时间和套餐后，系统会优先推荐相邻桌位，也可以手动选择桌号。"
+      : "无需解锁时间表，需要录入预约时点开填写";
   }
 }
 
@@ -1380,10 +1376,6 @@ function findQuickBookingRecommendation(peopleCount, startTime, endTime){
 }
 
 function recommendQuickBookingTables(){
-  if(bookingLocked){
-    alert("请先解锁预约时间表");
-    return;
-  }
   const {peopleCount,startTime,endTime} = getQuickBookingValues();
   if(!startTime) return alert("请先输入到店时间");
 
@@ -1404,8 +1396,6 @@ function recommendQuickBookingTables(){
 }
 
 async function confirmQuickBooking(){
-  if(bookingLocked) return alert("请先解锁预约时间表");
-
   const button = document.getElementById("quickBookingConfirm");
   if(button?.disabled) return;
 
@@ -1495,7 +1485,7 @@ async function confirmQuickBooking(){
     console.error("快速输入预约失败",error);
     alert("预约保存失败：" + (error?.message || String(error)));
   }finally{
-    button.disabled = bookingLocked;
+    button.disabled = false;
     button.innerText = "确认并加入预约时间表";
   }
 }

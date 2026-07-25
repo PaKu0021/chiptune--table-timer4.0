@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>预约系统</title>
-<link rel="stylesheet" href="./css/style.css?v=4.0.29">
+<link rel="stylesheet" href="./css/style.css?v=4.0.30">
 </head>
 
 <body>
@@ -27,7 +27,7 @@
   <div class="section-toggle quick-booking-toggle" onclick="toggleQuickBookingPanel()">
     <div>
       <h2>快速输入预约</h2>
-      <p id="quickBookingHelp" class="quick-booking-help">需要录入预约时点开填写</p>
+      <p id="quickBookingHelp" class="quick-booking-help">无需解锁时间表，需要录入预约时点开填写</p>
     </div>
     <button id="quickBookingToggleBtn" class="btn-ghost" type="button">展开 ▼</button>
   </div>
@@ -332,7 +332,7 @@
 </div>
 
 <script type="module">
-  import { renderNav } from "./js/nav.js?v=4.0.29";
+  import { renderNav } from "./js/nav.js?v=4.0.30";
 
   try {
     renderNav("booking");
@@ -340,7 +340,7 @@
     console.error("预约页面导航加载失败", error);
   }
 
-  import("./js/booking.js?v=4.0.29")
+  import("./js/booking.js?v=4.0.30")
     .catch(error => {
       console.error("booking.js 加载失败", error);
 

@@ -68,7 +68,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
   <script type="module">
-    import { db } from "./js/firebase.js?v=4.0.34";
+    import { db } from "./js/firebase.js?v=4.0.35";
     import { doc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 
     const ref = doc(db,"shop","main");
@@ -90,8 +90,16 @@
       `).join("");
 
       tables.forEach((t,i)=>{
-        const url = location.origin + location.pathname.replace("qr.html","display.html") + "?table=" + (i+1);
-        QRCode.toCanvas(document.getElementById("qr-"+i),url);
+        // 用 URL 解析生成稳定绝对地址，避免旧版字符串替换在非标准入口下
+        // 产生缺少仓库目录的链接。
+        const displayUrl = new URL("./display.html", document.baseURI);
+        displayUrl.search = "";
+        displayUrl.searchParams.set("table",String(i+1));
+        QRCode.toCanvas(
+          document.getElementById("qr-"+i),
+          displayUrl.href,
+          {errorCorrectionLevel:"H",margin:2,width:220}
+        );
       });
     });
   </script>

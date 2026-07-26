@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.34";
+import { db } from "./firebase.js?v=4.0.35";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.34";
-/*import { formatTime } from "./common.js?v=4.0.34";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.34";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.34";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.34";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.35";
+/*import { formatTime } from "./common.js?v=4.0.35";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.35";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.35";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.35";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -2789,10 +2789,12 @@ function generateQR(i){
   const canvas = document.getElementById("qr-"+i);
   if(!canvas) return;
 
-  const url = location.origin + location.pathname.replace("app.html","display.html") + "?table=" + (i+1);
+  const displayUrl = new URL("./display.html",document.baseURI);
+  displayUrl.search = "";
+  displayUrl.searchParams.set("table",String(i+1));
 
   import("https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js").then(QR=>{
-    QR.toCanvas(canvas,url);
+    QR.toCanvas(canvas,displayUrl.href,{errorCorrectionLevel:"H",margin:2});
   });
 }
 

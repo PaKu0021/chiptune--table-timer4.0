@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>正在修复桌位链接</title>
+</head>
+<body>
+  <p id="message">正在检查桌位二维码链接……</p>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const table = Number(params.get("table") || params.get("tableNo"));
+      const parts = location.pathname.split("/").filter(Boolean);
+      const repoIndex = parts.indexOf("chiptune--table-timer4.0");
+
+      if(Number.isInteger(table) && table > 0 && repoIndex >= 0){
+        const basePath = "/" + parts.slice(0,repoIndex + 1).join("/") + "/";
+        location.replace(
+          location.origin + basePath + "display.html?table=" + encodeURIComponent(table)
+        );
+        return;
+      }
+
+      document.getElementById("message").textContent =
+        "链接无效。请让店员重新打印最新版桌位二维码。";
+    })();
+  </script>
+</body>
+</html>

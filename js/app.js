@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.35";
+import { db } from "./firebase.js?v=4.0.36";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.35";
-/*import { formatTime } from "./common.js?v=4.0.35";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.35";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.35";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.35";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.36";
+/*import { formatTime } from "./common.js?v=4.0.36";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.36";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.36";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.36";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -1140,7 +1140,7 @@ filteredTables.forEach(({t,i})=>{
       <button class="table-card-summary" type="button" onclick="toggleTableCard(${i})" aria-expanded="${isExpanded}">
         <span class="table-card-summary-main">
           <strong>${t.name}</strong>
-          <b>${timeText}</b>
+          <b data-summary-timer="${i}">${timeText}</b>
           <small>${groupLabel}</small>
         </span>
         <span class="table-card-chevron">${isExpanded ? "收起 ▲" : "展开 ▼"}</span>
@@ -1156,12 +1156,8 @@ filteredTables.forEach(({t,i})=>{
 </select>
 
 
-<div class="timer" style="color:${status==="overtime" ? "#e85d5d" : status==="warning" ? "#ff9800" : "#333"};">
-  ${timeText}
-</div>
-
 ${t.start ? `
-  <div style="font-size:18px;font-weight:800;margin:-4px 0 10px;color:#8a8174;">
+  <div data-used-timer="${i}" style="font-size:18px;font-weight:800;margin:-4px 0 10px;color:#8a8174;">
     ${usedText}
   </div>
 ` : ""}
@@ -1736,8 +1732,13 @@ async function start(i){
   };
 
   render();
-  setSyncStatus("pending","● 正在由服务器锁定桌位…");
+  setSyncStatus("pending","● 本桌已开始 · 正在后台确认云端");
 
+  /*
+   * 从这里开始只做云端确认与附加资料同步。界面已经先按本机状态开始计时，
+   * 不再让按钮事件等待网络事务结束，因此店员可以立刻展开并开始另一桌。
+   */
+  void (async()=>{
   let serverStartCommitted = false;
   try{
     const result = await atomicStartTable({
@@ -1752,6 +1753,9 @@ async function start(i){
     serverStartCommitted = Boolean(result?.startedByThisDevice);
 
     if(!result?.startedByThisDevice){
+      if(result?.table){
+        state.tables[i] = JSON.parse(JSON.stringify(result.table));
+      }
       setSyncStatus("synced","● 该桌已由另一台设备开始，已同步最新状态");
       render();
       alert("这张桌已经由另一台设备开始，当前画面已同步。");
@@ -1760,7 +1764,20 @@ async function start(i){
 
     // 事务返回的服务器状态必须成为当前页面的新基线。
     // 不能继续拿开始前的旧整份 state 做后续保存，否则返回首页时可能被旧快照覆盖。
-    state = JSON.parse(JSON.stringify(result.state));
+    const confirmedState = JSON.parse(JSON.stringify(result.state));
+    const liveTables = Array.isArray(state?.tables)
+      ? state.tables
+      : [];
+    /*
+     * 只采用服务器确认的当前桌，保留页面上其他桌的即时操作。
+     * 连续开始两桌时，第一桌较晚返回的网络结果不能把第二桌恢复成未开始。
+     */
+    confirmedState.tables = confirmedState.tables.map((serverTable,index)=>
+      index === i
+        ? serverTable
+        : JSON.parse(JSON.stringify(liveTables[index] || serverTable))
+    );
+    state = confirmedState;
 
     // 服务器成功锁定后再建立组，避免双设备同时生成两组。
     const current = state.tables[i];
@@ -1832,6 +1849,8 @@ async function start(i){
       alert("桌位已经成功开始并产生账单，但本机缓存保存失败。请不要重复点击开始，系统会继续同步。");
     }
   }
+  })();
+  return;
 }
 
 function pause(i){
@@ -2839,6 +2858,32 @@ function renderAlarmPanel(){
   }).join("");
 }
 
+function refreshVisibleTimerText(){
+  if(!state?.tables) return;
+
+  state.tables.forEach((table,index)=>{
+    const packageInfo = getPackage(table);
+    const elapsed = getElapsedMs(table);
+    const remain = getLimitMs(table) - elapsed;
+    const status = getStatus(table);
+    const summary = !table.start
+      ? "未开始"
+      : table.pausedAt
+        ? "暂停中 " + formatTime(elapsed)
+        : packageInfo.unlimited
+          ? "已使用 " + formatTime(elapsed)
+          : status === "overtime"
+            ? "超时 " + formatTime(Math.abs(remain))
+            : "剩余 " + formatTime(remain);
+
+    const summaryNode = document.querySelector(`[data-summary-timer="${index}"]`);
+    if(summaryNode) summaryNode.textContent = summary;
+
+    const usedNode = document.querySelector(`[data-used-timer="${index}"]`);
+    if(usedNode) usedNode.textContent = table.start ? "已用 " + formatTime(elapsed) : "";
+  });
+}
+
 setInterval(()=>{
   const active = document.activeElement;
 
@@ -2854,7 +2899,8 @@ setInterval(()=>{
     return;
   }
 
-  render();
+  // 秒表只更新已有文字，避免每秒销毁并重建所有桌卡和输入框。
+  refreshVisibleTimerText();
 },1000);
 
 function setSearchKeyword(v){

@@ -1598,12 +1598,13 @@ export function installConnectionGuard(){
   window.addEventListener("online",update);
   window.addEventListener("offline",update);
   document.addEventListener("visibilitychange",()=>{ if(!document.hidden) update(); });
-  // 弱网环境下定时重试待上传操作；所有打开程序的设备都可参与实时操作。
+  // 正常保存会立即触发上传，这里只作为弱网后的安全重试。
+  // 旧版每 3 秒扫描一次队列，会让同时打开的多个页面持续争抢 IndexedDB。
   setInterval(()=>{
     if(navigator.onLine){
       window.dispatchEvent(new CustomEvent("chiptune-sync-tick",{detail:{online:true}}));
     }
-  },3000);
+  },10000);
   update();
 }
 

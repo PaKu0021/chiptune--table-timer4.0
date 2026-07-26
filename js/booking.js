@@ -1,16 +1,55 @@
-﻿import { db } from "./firebase.js?v=4.0.35";
+﻿import { db } from "./firebase.js?v=4.0.38";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.35";
-import { resetTable } from "./common.js?v=4.0.35";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.35";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.35";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.38";
+import { resetTable } from "./common.js?v=4.0.38";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.38";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.38";
 
 const ref = doc(db, "shop", "main");
 let state = null;
+let lastBookingRenderKey = "";
+
+function getBookingRenderKey(candidate){
+  return JSON.stringify({
+    revision:candidate?._sync?.revision || 0,
+    updatedAt:candidate?._sync?.updatedAt || 0,
+    operationId:candidate?._sync?.operationId || "",
+    bookings:(candidate?.bookings || []).map(booking=>[
+      booking.id,
+      booking.updatedAt,
+      booking.startTime,
+      booking.endTime,
+      booking.checkedIn,
+      booking.cancelled,
+      booking.name,
+      booking.phone,
+      booking.tableIndexes
+    ]),
+    tables:(candidate?.tables || []).map(table=>[
+      table.start,
+      table.pausedAt,
+      table.extra,
+      table.packageIndex,
+      table.bookingId,
+      table.groupId,
+      table.version,
+      table.lastOperationId
+    ])
+  });
+}
+
+function shouldRenderBookingState(candidate){
+  const key = getBookingRenderKey(candidate);
+  if(key === lastBookingRenderKey) return false;
+  lastBookingRenderKey = key;
+  return true;
+}
+
 installConnectionGuard();
 loadLocalState().then(local=>{
   if(local && !state){
     state = local;
+    shouldRenderBookingState(state);
     try{ renderList(); renderBookingGrid(); startBookingAutoRefresh(); }catch(err){ console.warn("本机预约缓存显示失败",err); }
   }
 });
@@ -30,6 +69,8 @@ window.addEventListener("chiptune-state-broadcast", event=>{
   if(!Array.isArray(state.tables)) state.tables = [];
   ensureGroups(state);
 
+  if(!shouldRenderBookingState(state)) return;
+
   try{
     renderBookingGridPreservingScroll();
     renderList();
@@ -45,6 +86,7 @@ window.addEventListener("storage", event=>{
     if(!box?.state) return;
     state = box.state;
     ensureGroups(state);
+    if(!shouldRenderBookingState(state)) return;
     renderBookingGridPreservingScroll();
     renderList();
   }catch(error){
@@ -76,6 +118,7 @@ let moveAreaRect = null;
 let dragFromCenter = null;
 let bookingAutoRefreshTimer = null;
 let runningTimeTextTimer = null;
+let lastBookingSafetyRefreshKey = "";
 let quickBookingInitialized = false;
 let quickBookingOpen = false;
 const repairingTableRecords = new Set();
@@ -216,6 +259,11 @@ onSnapshot(ref, { includeMetadataChanges:true }, async snap=>{
     });
   }
 
+
+if(!shouldRenderBookingState(state)){
+  startBookingAutoRefresh();
+  return;
+}
 
 try{
   renderList();
@@ -961,27 +1009,22 @@ function startBookingAutoRefresh(){
 
     if(openedModal) return;
 
-    const scroller =
-      document.querySelector(".booking-grid-wrap") ||
-      document.getElementById("bookingGrid");
-
-    const left = scroller ? scroller.scrollLeft : 0;
-    const top = scroller ? scroller.scrollTop : 0;
-
     loadLocalState().then(local=>{
-      if(local) state = local;
-      renderBookingGrid();
-      renderList();
+      if(!local) return;
 
-      requestAnimationFrame(()=>{
-        if(scroller){
-          scroller.scrollLeft = left;
-          scroller.scrollTop = top;
-        }
-      });
+      const key = getBookingRenderKey(local);
+
+      // BroadcastChannel、storage 和 Firestore 监听已经负责即时刷新。
+      // 这里只在确实漏掉事件且本机数据发生变化时才重建时间表。
+      if(key === lastBookingSafetyRefreshKey) return;
+      lastBookingSafetyRefreshKey = key;
+      if(!shouldRenderBookingState(local)) return;
+      state = local;
+      renderBookingGridPreservingScroll();
+      renderList();
     }).catch(error=>console.warn("预约自动刷新读取本机状态失败", error));
 
-  },3000);
+  },10000);
 }
 
 document.addEventListener("visibilitychange",()=>{

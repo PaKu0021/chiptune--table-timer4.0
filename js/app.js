@@ -1,17 +1,18 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.36";
+import { db } from "./firebase.js?v=4.0.38";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.36";
-/*import { formatTime } from "./common.js?v=4.0.36";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.36";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.36";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.36";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.38";
+/*import { formatTime } from "./common.js?v=4.0.38";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.38";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.38";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.38";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
 
 
 let state = null;
+let lastAppliedAppStateKey = "";
 installConnectionGuard();
 
 loadLocalState()
@@ -373,9 +374,51 @@ function applyIncomingAppState(
     return;
   }
 
-  state = normalizeAppState(
+  const normalized = normalizeAppState(
     structuredClone(incoming)
   );
+  const incomingKey = JSON.stringify({
+    revision:normalized?._sync?.revision || 0,
+    updatedAt:normalized?._sync?.updatedAt || 0,
+    operationId:normalized?._sync?.operationId || "",
+    tables:(normalized.tables || []).map(table=>[
+      table.start,
+      table.pausedAt,
+      table.extra,
+      table.packageIndex,
+      table.startLocked,
+      table.customer?.name,
+      table.customer?.phoneLast4,
+      table.type,
+      table.pay,
+      table.currency,
+      table.groupId,
+      table.version,
+      table.lastOperationId
+    ]),
+    bookings:(normalized.bookings || []).map(booking=>[
+      booking.id,
+      booking.updatedAt,
+      booking.checkedIn,
+      booking.cancelled,
+      booking.startTime,
+      booking.endTime,
+      booking.tableIndexes
+    ]),
+    groups:(normalized.groups || []).map(group=>[
+      group.id,
+      group.updatedAt,
+      group.name,
+      group.tableIndexes
+    ])
+  });
+
+  if(incomingKey === lastAppliedAppStateKey){
+    return;
+  }
+
+  state = normalized;
+  lastAppliedAppStateKey = incomingKey;
 
   try{
     render();

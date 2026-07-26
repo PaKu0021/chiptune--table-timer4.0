@@ -1,4 +1,4 @@
-﻿import { db } from "./firebase.js?v=4.0.40";
+﻿import { db } from "./firebase.js?v=4.0.41";
 import { doc, onSnapshot, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 
 const ref = doc(db,"shop","main");
@@ -7,6 +7,9 @@ const tableNo = Number(params.get("table"));
 const tableIndex = tableNo - 1;
 
 let state = null;
+let serverRefreshPromise = null;
+let lastServerRefreshAt = 0;
+const SERVER_REFRESH_INTERVAL_MS = 60000;
 
 function formatTime(ms){
   ms = Math.max(0,ms);
@@ -65,24 +68,36 @@ onSnapshot(ref,{includeMetadataChanges:true},snap=>{
   if(snap.metadata.fromCache && navigator.onLine) refreshFromServer();
 },err=>{
   console.warn("二维码页面实时监听失败",err);
-  if(navigator.onLine) refreshFromServer();
+  if(navigator.onLine) refreshFromServer({force:true});
 });
 
-async function refreshFromServer(){
+async function refreshFromServer({force=false}={}){
   if(!navigator.onLine) return;
-  try{
-    const snap = await getDocFromServer(ref);
-    if(snap.exists()){
-      state = snap.data();
-      renderDisplay();
+  if(serverRefreshPromise) return serverRefreshPromise;
+
+  const now = Date.now();
+  if(!force && now - lastServerRefreshAt < SERVER_REFRESH_INTERVAL_MS) return;
+
+  serverRefreshPromise = (async()=>{
+    try{
+      const snap = await getDocFromServer(ref);
+      lastServerRefreshAt = Date.now();
+      if(snap.exists()){
+        state = snap.data();
+        renderDisplay();
+      }
+    }catch(err){
+      console.warn("二维码页面刷新云端状态失败",err);
+    }finally{
+      serverRefreshPromise = null;
     }
-  }catch(err){
-    console.warn("二维码页面刷新云端状态失败",err);
-  }
+  })();
+
+  return serverRefreshPromise;
 }
 
 setInterval(renderDisplay,1000);
-setInterval(refreshFromServer,2000);
-window.addEventListener("online",refreshFromServer);
-document.addEventListener("visibilitychange",()=>{ if(!document.hidden) refreshFromServer(); });
-refreshFromServer();
+setInterval(()=>refreshFromServer(),SERVER_REFRESH_INTERVAL_MS);
+window.addEventListener("online",()=>refreshFromServer({force:true}));
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden) refreshFromServer({force:true}); });
+refreshFromServer({force:true});

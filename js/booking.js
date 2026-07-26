@@ -1,40 +1,45 @@
-﻿import { db } from "./firebase.js?v=4.0.39";
+﻿import { db } from "./firebase.js?v=4.0.40";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.39";
-import { resetTable } from "./common.js?v=4.0.39";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.39";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.39";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, getLocalStateSync, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.40";
+import { resetTable } from "./common.js?v=4.0.40";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.40";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.40";
 
 const ref = doc(db, "shop", "main");
 let state = null;
 let lastBookingRenderKey = "";
 
+function withoutBookingSyncMeta(value){
+  if(!value || typeof value !== "object") return value;
+  const {
+    _entitySync,
+    updatedAt,
+    localUpdatedAt,
+    lastOperationId,
+    version,
+    ...visible
+  } = value;
+  return visible;
+}
+
 function getBookingRenderKey(candidate){
   return JSON.stringify({
-    revision:candidate?._sync?.revision || 0,
-    updatedAt:candidate?._sync?.updatedAt || 0,
-    operationId:candidate?._sync?.operationId || "",
-    bookings:(candidate?.bookings || []).map(booking=>[
-      booking.id,
-      booking.updatedAt,
-      booking.startTime,
-      booking.endTime,
-      booking.checkedIn,
-      booking.cancelled,
-      booking.name,
-      booking.phone,
-      booking.tableIndexes
-    ]),
-    tables:(candidate?.tables || []).map(table=>[
-      table.start,
-      table.pausedAt,
-      table.extra,
-      table.packageIndex,
-      table.bookingId,
-      table.groupId,
-      table.version,
-      table.lastOperationId
-    ])
+    bookings:(candidate?.bookings || []).map(withoutBookingSyncMeta),
+    tables:(candidate?.tables || []).map(table=>({
+      name:table.name,
+      start:table.start,
+      pausedAt:table.pausedAt,
+      extra:table.extra,
+      packageIndex:table.packageIndex,
+      bookingId:table.bookingId,
+      groupId:table.groupId,
+      groupName:table.groupName,
+      groupColor:table.groupColor,
+      activeColor:table.activeColor,
+      customer:table.customer,
+      type:table.type
+    })),
+    packages:candidate?.packages || []
   });
 }
 
@@ -316,7 +321,7 @@ async function save(action="booking_update"){
    * 客户数据覆盖进去；桌台运行状态始终采用计时器写入的最新版本。
    */
   if(action === "create_booking" || action === "booking_detail_update"){
-    const latest = await loadLocalState();
+    const latest = getLocalStateSync();
 
     if(latest){
       const bookingData = Array.isArray(state?.bookings) ? state.bookings : [];

@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.39";
+import { db } from "./firebase.js?v=4.0.40";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.39";
-/*import { formatTime } from "./common.js?v=4.0.39";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.39";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.39";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.39";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.40";
+/*import { formatTime } from "./common.js?v=4.0.40";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.40";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.40";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.40";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -189,6 +189,19 @@ function preserveProtectedTables(incomingState){
     }
   }
   return incomingState;
+}
+
+function withoutSyncMeta(value){
+  if(!value || typeof value !== "object") return value;
+  const {
+    _entitySync,
+    updatedAt,
+    localUpdatedAt,
+    lastOperationId,
+    version,
+    ...visible
+  } = value;
+  return visible;
 }
 
 
@@ -401,42 +414,15 @@ function applyIncomingAppState(
     structuredClone(incoming)
   ));
   const incomingKey = JSON.stringify({
-    revision:normalized?._sync?.revision || 0,
-    updatedAt:normalized?._sync?.updatedAt || 0,
-    operationId:normalized?._sync?.operationId || "",
-    tables:(normalized.tables || []).map(table=>[
-      table.start,
-      table.pausedAt,
-      table.extra,
-      table.packageIndex,
-      table.startLocked,
-      table.customer?.name,
-      table.customer?.phoneLast4,
-      table.type,
-      table.pay,
-      table.currency,
-      table.groupId,
-      table.version,
-      table.lastOperationId
-    ]),
-    bookings:(normalized.bookings || []).map(booking=>[
-      booking.id,
-      booking.updatedAt,
-      booking.checkedIn,
-      booking.cancelled,
-      booking.startTime,
-      booking.endTime,
-      booking.tableIndexes
-    ]),
-    groups:(normalized.groups || []).map(group=>[
-      group.id,
-      group.updatedAt,
-      group.name,
-      group.tableIndexes
-    ])
+    tables:(normalized.tables || []).map(withoutSyncMeta),
+    packages:normalized.packages || [],
+    bookings:(normalized.bookings || []).map(withoutSyncMeta),
+    groups:(normalized.groups || []).map(withoutSyncMeta)
   });
 
   if(incomingKey === lastAppliedAppStateKey){
+    // 只更新同步版本，不重建桌位 DOM。当前展开位置、输入焦点和下拉框保持不动。
+    state = normalized;
     return;
   }
 
@@ -920,7 +906,24 @@ function createOrUpdateCustomerVisit(t){
   return visit;
 }
 
-async function createOrUpdateRecord(t, options = {}){
+const tableRecordUpdateQueues = new Map();
+
+function createOrUpdateRecord(t,options = {}){
+  const key = String(t?.recordId || t?.visitId || t?.name || "unknown");
+  const previous = tableRecordUpdateQueues.get(key) || Promise.resolve();
+  const next = previous
+    .catch(()=>{})
+    .then(()=>performCreateOrUpdateRecord(t,options))
+    .finally(()=>{
+      if(tableRecordUpdateQueues.get(key) === next){
+        tableRecordUpdateQueues.delete(key);
+      }
+    });
+  tableRecordUpdateQueues.set(key,next);
+  return next;
+}
+
+async function performCreateOrUpdateRecord(t, options = {}){
 
   const p = getPackage(t);
 const originalJPY = getOriginalJPY(t);
@@ -1245,8 +1248,8 @@ ${t.start ? `
       </div>
 
 <div class="action-row">
-<button class="btn-ghost" style="${t.type==="walkin" ? "background:#f2c94c;color:#332d24;border-color:#d8a900;" : ""}" onclick="toggleType(${i},'walkin')">Walk-in</button>
-<button class="btn-ghost" style="${t.type==="booking" ? "background:#f2c94c;color:#332d24;border-color:#d8a900;" : ""}" onclick="toggleType(${i},'booking')">预约</button>
+<button id="type-walkin-${i}" class="btn-ghost" style="${t.type==="walkin" ? "background:#f2c94c;color:#332d24;border-color:#d8a900;" : ""}" onclick="toggleType(${i},'walkin')">Walk-in</button>
+<button id="type-booking-${i}" class="btn-ghost" style="${t.type==="booking" ? "background:#f2c94c;color:#332d24;border-color:#d8a900;" : ""}" onclick="toggleType(${i},'booking')">预约</button>
 </div>
 
 <label style="display:block;margin:10px 0 8px;font-weight:700;color:#6f6659;">
@@ -1288,11 +1291,11 @@ ${t.start ? `
         </div>
       `}
       
-      <select onpointerdown="beginTableInteraction()" onfocus="beginTableInteraction()" onchange="setPayTiming(${i},this.value);finishTableInteractionSoon()" ${t.start ? "disabled" : ""}>
+      <select id="pay-timing-${i}" onpointerdown="beginTableInteraction(${i})" onfocus="beginTableInteraction(${i})" onchange="setPayTiming(${i},this.value);finishTableInteractionSoon()" ${t.start ? "disabled" : ""}>
        <option value="prepaid" ${t.payTiming==="prepaid"?"selected":""}>先付款</option>
        <option value="postpaid" ${t.payTiming==="postpaid"?"selected":""}>后付款</option>
       </select>
-      <select onpointerdown="beginTableInteraction()" onfocus="beginTableInteraction()" onchange="setPay(${i},this.value);finishTableInteractionSoon()">
+      <select id="pay-method-${i}" onpointerdown="beginTableInteraction(${i})" onfocus="beginTableInteraction(${i})" onchange="setPay(${i},this.value);finishTableInteractionSoon()">
         <option value="">付款方式</option>
         <option value="现金" ${t.pay==="现金"?"selected":""}>现金</option>
         <option value="PayPay" ${t.pay==="PayPay"?"selected":""}>PayPay</option>
@@ -1300,7 +1303,7 @@ ${t.start ? `
         <option value="支付宝" ${t.pay==="支付宝"?"selected":""}>支付宝</option>
       </select>
 
-      <select onpointerdown="beginTableInteraction()" onfocus="beginTableInteraction()" onchange="setCurrency(${i},this.value);finishTableInteractionSoon()">
+      <select id="currency-${i}" onpointerdown="beginTableInteraction(${i})" onfocus="beginTableInteraction(${i})" onchange="setCurrency(${i},this.value);finishTableInteractionSoon()">
         <option value="日元" ${t.currency==="日元"?"selected":""}>日元</option>
         <option value="人民币" ${t.currency==="人民币"?"selected":""}>人民币</option>
       </select>
@@ -1423,8 +1426,20 @@ function toggleType(i,type){
   if(nameInput) t.customer.name = nameInput.value;
   if(phoneInput) t.customer.phoneLast4 = phoneInput.value;
 
-  render();
-  save();
+  refreshTypeButtons(i);
+  save("change_customer_type");
+}
+
+function refreshTypeButtons(i){
+  const type = state.tables[i]?.type || "";
+  for(const value of ["walkin","booking"]){
+    const button = document.getElementById(`type-${value}-${i}`);
+    if(!button) continue;
+    const active = type === value;
+    button.style.background = active ? "#f2c94c" : "";
+    button.style.color = active ? "#332d24" : "";
+    button.style.borderColor = active ? "#d8a900" : "";
+  }
 }
 
 function setWalkin(i){
@@ -1632,7 +1647,8 @@ function shouldDeferTableRender(){
   if(!active) return false;
   if(isPreMinutesInput(active)) return true;
   if(active.tagName === "SELECT"){
-    return active.id !== "sortMode" && !active.id?.includes("Filter");
+    // select 的 change 已经提交值；保护期结束后无需继续因焦点而阻塞同步。
+    return false;
   }
   if(active.tagName !== "INPUT" && active.tagName !== "TEXTAREA") return false;
   return /^name-\d+$/.test(active.id || "") ||
@@ -1962,54 +1978,66 @@ function resume(i){
 async function addHour(i){
   stopAlertLoop(i);
   protectLocalTable(i,20000);
-  const beforeJPY = getOriginalJPY(state.tables[i]);
-  try{
-    const updated = await atomicAdjustTableExtra({
-      db, ref, tableIndex:i, deltaMs:60 * 60 * 1000, action:"extend_one_hour", getState:()=>state
-    });
-    state.tables[i] = {...state.tables[i], ...updated};
-    const afterJPY = getOriginalJPY(state.tables[i]);
-    const deltaJPY = Math.max(0, afterJPY - beforeJPY);
-    await createOrUpdateRecord(state.tables[i],{
-      adjustmentJPY: state.tables[i].payTiming === "prepaid" ? deltaJPY : 0,
-      actionKey:`extend_${Date.now()}_${Number(state.tables[i].extra || 0)}`,
+  const table = state.tables[i];
+  const beforeJPY = getOriginalJPY(table);
+  table.extra = Number(table.extra || 0) + 60 * 60 * 1000;
+  table.alerted = false;
+  table.alerting = false;
+  table.lastAction = "extend_one_hour";
+  table.updatedAt = Date.now();
+  const afterJPY = getOriginalJPY(table);
+  const deltaJPY = Math.max(0,afterJPY - beforeJPY);
+  const actionKey = `extend_${Date.now()}_${Number(table.extra || 0)}`;
+
+  render();
+  const saveTask = save("extend_one_hour");
+  if(table.start){
+    createOrUpdateRecord(table,{
+      adjustmentJPY:table.payTiming === "prepaid" ? deltaJPY : 0,
+      actionKey,
       note:"续时1小时，开始时已收款"
-    });
-    render();
-  }catch(err){
-    alert(err.message || "续时保存失败");
+    }).catch(err=>console.warn("续时账单将在后台重试",err));
   }
+  saveTask.catch(err=>{
+    console.error("续时保存失败",err);
+    setSyncStatus("pending","● 续时已保存在应急副本 · 等待重新同步");
+  });
 }
 
 async function undoHour(i){
   stopAlertLoop(i);
   protectLocalTable(i,20000);
-  const beforeJPY = getOriginalJPY(state.tables[i]);
-  try{
-    const updated = await atomicAdjustTableExtra({
-      db, ref, tableIndex:i, deltaMs:-60 * 60 * 1000, action:"undo_one_hour", getState:()=>state
-    });
-    state.tables[i] = {...state.tables[i], ...updated};
-    const afterJPY = getOriginalJPY(state.tables[i]);
-    const refundJPY = Math.min(0, afterJPY - beforeJPY);
-    if(state.tables[i].start){
-      await createOrUpdateRecord(state.tables[i],{
-        adjustmentJPY: state.tables[i].payTiming === "prepaid" ? refundJPY : 0,
-        actionKey:`undo_${Date.now()}_${Number(state.tables[i].extra || 0)}`,
-        note:"撤回续时1小时，记录退款差额"
-      });
-    }
-    render();
-  }catch(err){
-    alert(err.message || "撤回续时失败");
+  const table = state.tables[i];
+  if(Number(table.extra || 0) < 60 * 60 * 1000) return;
+  const beforeJPY = getOriginalJPY(table);
+  table.extra = Math.max(0,Number(table.extra || 0) - 60 * 60 * 1000);
+  table.alerted = false;
+  table.alerting = false;
+  table.lastAction = "undo_one_hour";
+  table.updatedAt = Date.now();
+  const afterJPY = getOriginalJPY(table);
+  const refundJPY = Math.min(0,afterJPY - beforeJPY);
+  const actionKey = `undo_${Date.now()}_${Number(table.extra || 0)}`;
+
+  render();
+  const saveTask = save("undo_one_hour");
+  if(table.start){
+    createOrUpdateRecord(table,{
+      adjustmentJPY:table.payTiming === "prepaid" ? refundJPY : 0,
+      actionKey,
+      note:"撤回续时1小时，记录退款差额"
+    }).catch(err=>console.warn("撤回续时账单将在后台重试",err));
   }
+  saveTask.catch(err=>{
+    console.error("撤回续时保存失败",err);
+    setSyncStatus("pending","● 撤回续时已保存在应急副本 · 等待重新同步");
+  });
 }
 
 
 function setPayTiming(i,v){
   protectLocalTable(i);
   state.tables[i].payTiming = v;
-  render();
   save("change_payment_timing");
 }
 
@@ -2020,7 +2048,8 @@ async function setPay(i,v){
   const t = state.tables[i];
   t.pay = v;
   t.currency = currencyForPaymentMethod(v);
-  render();
+  const currencySelect = document.getElementById(`currency-${i}`);
+  if(currencySelect) currencySelect.value = t.currency;
   const stateSaved = save("change_payment_method");
 
   // 运行中修改这里只代表“下一笔补收使用的付款方式”。
@@ -2037,7 +2066,10 @@ async function setCurrency(i,v){
   const t = state.tables[i];
   const expected = currencyForPaymentMethod(t.pay);
   t.currency = t.pay ? expected : v;
-  render();
+  const currencySelect = document.getElementById(`currency-${i}`);
+  if(currencySelect && currencySelect.value !== t.currency){
+    currencySelect.value = t.currency;
+  }
   const stateSaved = save("change_currency");
 
   if(t.start){

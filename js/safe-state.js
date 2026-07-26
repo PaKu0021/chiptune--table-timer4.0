@@ -493,6 +493,13 @@ export async function loadLocalState(){
   return null;
 }
 
+// localStorage 影子在每次操作的同一事件循环内就会写入。
+// 预约页可用它立即取得其他页面刚保存的桌位状态，避免等待 IndexedDB。
+export function getLocalStateSync(){
+  const shadow = readShadow(STATE_SHADOW);
+  return shadow?.state ? clone(shadow.state) : null;
+}
+
 async function writeLocalState(state, cloudBaseline=baseline){
   const box = {state:clone(state),cloudBaseline:clone(cloudBaseline),savedAt:Date.now(),deviceId:getDeviceId()};
   writeShadow(STATE_SHADOW,box);

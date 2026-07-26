@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.40";
+import { db } from "./firebase.js?v=4.0.41";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.40";
-/*import { formatTime } from "./common.js?v=4.0.40";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.40";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.40";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.40";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.41";
+/*import { formatTime } from "./common.js?v=4.0.41";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.41";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.41";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.41";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -103,37 +103,53 @@ window.addEventListener(
   }
 );
 // iPad 桌面网页偶尔会只停留在 Firestore 缓存。实时快照负责正常同步，
-// 这里每10秒只做一次安全核对，避免频繁网络读取打断连续桌位操作。
-async function refreshSharedStateFromServer(){
+// 这里每60秒只做一次安全核对；恢复联网或回到前台时立即核对一次。
+// 同一时刻只允许一个服务器请求，避免弱网下请求堆积后连续覆盖界面。
+let sharedStateRefreshPromise = null;
+let lastSharedStateRefreshAt = 0;
+const SHARED_STATE_REFRESH_INTERVAL_MS = 60000;
+
+async function refreshSharedStateFromServer({force=false}={}){
   if(!navigator.onLine) return;
   if(shouldDeferTableRender()) return;
+  if(sharedStateRefreshPromise) return sharedStateRefreshPromise;
 
-  try{
-    const snap =
-      await getDocFromServer(ref);
+  const now = Date.now();
+  if(!force && now - lastSharedStateRefreshAt < SHARED_STATE_REFRESH_INTERVAL_MS) return;
 
-    if(!snap.exists()) return;
+  sharedStateRefreshPromise = (async()=>{
+    try{
+      const snap =
+        await getDocFromServer(ref);
 
-    const incoming =
-      await reconcileCloudState(
-        snap.data()
+      lastSharedStateRefreshAt = Date.now();
+      if(!snap.exists()) return;
+
+      const incoming =
+        await reconcileCloudState(
+          snap.data()
+        );
+
+      applyIncomingAppState(
+        incoming,
+        "主动服务器刷新"
       );
 
-    applyIncomingAppState(
-      incoming,
-      "主动服务器刷新"
-    );
+    }catch(error){
+      console.warn(
+        "主动刷新共享桌位状态失败",
+        error
+      );
+    }finally{
+      sharedStateRefreshPromise = null;
+    }
+  })();
 
-  }catch(error){
-    console.warn(
-      "主动刷新共享桌位状态失败",
-      error
-    );
-  }
+  return sharedStateRefreshPromise;
 }
-setInterval(refreshSharedStateFromServer,10000);
-window.addEventListener("online",refreshSharedStateFromServer);
-document.addEventListener("visibilitychange",()=>{ if(!document.hidden) refreshSharedStateFromServer(); });
+setInterval(()=>refreshSharedStateFromServer(),SHARED_STATE_REFRESH_INTERVAL_MS);
+window.addEventListener("online",()=>refreshSharedStateFromServer({force:true}));
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden) refreshSharedStateFromServer({force:true}); });
 
 let checkoutIndex = null;
 let checkoutSubmitting = false;

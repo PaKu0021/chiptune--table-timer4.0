@@ -1,8 +1,8 @@
-﻿import { db } from "./firebase.js?v=4.0.40";
-import { RMB_PER_JPY } from "./business-day.js?v=4.0.40";
+﻿import { db } from "./firebase.js?v=4.0.41";
+import { RMB_PER_JPY } from "./business-day.js?v=4.0.41";
 
-import { loadLocalRecords, mergeRecordLists, saveRecordSafely, installConnectionGuard, flushPending, subscribeAllRecords } from "./safe-state.js?v=4.0.40";
-import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.40";
+import { loadLocalRecords, mergeRecordLists, saveRecordSafely, installConnectionGuard, flushPending, subscribeAllRecords } from "./safe-state.js?v=4.0.41";
+import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.41";
 
 
 import {

@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.44";
+import { db } from "./firebase.js?v=4.0.45";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.44";
-/*import { formatTime } from "./common.js?v=4.0.44";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.44";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.44";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.44";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.45";
+/*import { formatTime } from "./common.js?v=4.0.45";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.45";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.45";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.45";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -203,11 +203,15 @@ if(Number.isInteger(requestedTableIndex) && requestedTableIndex >= 0){
 }
 let tableInteractionHoldUntil = 0;
 const locallyProtectedTables = new Map();
+const LOCAL_TABLE_PROTECTION_MS = 5 * 60 * 1000;
 
 function protectLocalTable(i,durationMs=12000){
   const index = Number(i);
   if(!Number.isInteger(index) || index < 0) return;
-  locallyProtectedTables.set(index,Date.now() + Math.max(1000,Number(durationMs) || 0));
+  locallyProtectedTables.set(
+    index,
+    Date.now() + Math.max(LOCAL_TABLE_PROTECTION_MS,Number(durationMs) || 0)
+  );
   tableInteractionHoldUntil = Math.max(tableInteractionHoldUntil,Date.now() + 900);
 }
 
@@ -219,9 +223,37 @@ function preserveProtectedTables(incomingState){
       locallyProtectedTables.delete(index);
       continue;
     }
-    if(state.tables[index]){
-      incomingState.tables[index] = structuredClone(state.tables[index]);
+    const localTable = state.tables[index];
+    const incomingTable = incomingState.tables[index];
+    if(!localTable) continue;
+
+    const localOperationId = String(
+      localTable?._entitySync?.operationId ||
+      localTable?.lastOperationId ||
+      ""
+    );
+    const incomingOperationId = String(
+      incomingTable?._entitySync?.operationId ||
+      incomingTable?.lastOperationId ||
+      ""
+    );
+    const sameVisibleState =
+      JSON.stringify(withoutSyncMeta(localTable)) ===
+      JSON.stringify(withoutSyncMeta(incomingTable));
+
+    // 云端已经确认了本机这次操作，或内容已经完全一致，才解除保护。
+    if(
+      sameVisibleState ||
+      (
+        localOperationId &&
+        incomingOperationId === localOperationId
+      )
+    ){
+      locallyProtectedTables.delete(index);
+      continue;
     }
+
+    incomingState.tables[index] = structuredClone(localTable);
   }
   return incomingState;
 }
@@ -457,9 +489,15 @@ function applyIncomingAppState(
     return;
   }
 
-  const normalized = preserveProtectedTables(normalizeAppState(
+  const normalizedIncoming = normalizeAppState(
     structuredClone(incoming)
-  ));
+  );
+  const isImmediateLocalState =
+    String(source).startsWith("本机页面同步") &&
+    !String(source).includes("sync_batch_complete");
+  const normalized = isImmediateLocalState
+    ? normalizedIncoming
+    : preserveProtectedTables(normalizedIncoming);
   const incomingKey = JSON.stringify({
     tables:(normalized.tables || []).map(withoutSyncMeta),
     packages:normalized.packages || [],

@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.42";
-import { RMB_PER_JPY } from "./business-day.js?v=4.0.42";
+﻿import { db } from "./firebase.js?v=4.0.43";
+import { RMB_PER_JPY } from "./business-day.js?v=4.0.43";
 
 import { doc, onSnapshot, collection, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.42";
-import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.42";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.43";
+import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.43";
 
 const ref = doc(db,"shop","main");
 const recordsRef = collection(db,"records");
@@ -49,7 +49,28 @@ function schedulePaymentAmountRepairs(list){
     };
     repairingPaymentAmountRecords.add(String(rawRecord.id));
     records = mergeRecordLists(records,[record]);
-    saveRecordSafely({db,ref,record})
+    const paymentWrites = record.payments
+      .filter(payment=>payment?.jpyAmountAutoRepaired && payment?.id)
+      .map(payment=>setDoc(
+        doc(db,"records",String(record.id),"payments",String(payment.id)),
+        {
+          amountJPY:Number(payment.amountJPY || 0),
+          jpyAmountAutoRepaired:true
+        },
+        {merge:true}
+      ));
+    const recordPatch = {
+      jpyAmountsAutoRepaired:true,
+      jpyAmountsAutoRepairedAt:record.jpyAmountsAutoRepairedAt
+    };
+    if(Number(rawRecord.totalJPY || 0) === 0) recordPatch.totalJPY = Number(record.totalJPY || 0);
+    if(Number(rawRecord.paidJPY || 0) === 0) recordPatch.paidJPY = Number(record.paidJPY || 0);
+    if(rawRecord.dueJPY !== undefined) recordPatch.dueJPY = Number(record.dueJPY || 0);
+
+    Promise.all([
+      setDoc(doc(db,"records",String(record.id)),recordPatch,{merge:true}),
+      ...paymentWrites
+    ])
       .catch(error=>console.warn("人民币付款日元换算补全失败",error))
       .finally(()=>repairingPaymentAmountRecords.delete(String(rawRecord.id)));
   }
@@ -57,7 +78,6 @@ function schedulePaymentAmountRepairs(list){
 
 loadLocalRecords().then(localRecords=>{
   records = mergeRecordLists(records, localRecords);
-  schedulePaymentAmountRepairs(records);
   if(state) render();
 }).catch(err=>console.warn("读取本机收银记录失败",err));
 

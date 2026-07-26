@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.46";
+import { db } from "./firebase.js?v=4.0.47";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.46";
-/*import { formatTime } from "./common.js?v=4.0.46";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.46";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.46";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.46";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.47";
+/*import { formatTime } from "./common.js?v=4.0.47";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.47";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.47";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.47";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -1540,15 +1540,47 @@ async function setPackage(i,v){
   if(nextIndex === Number(t.packageIndex || 0)) return;
   protectLocalTable(i);
 
-  // 只替换套餐规则，不修改 start / pausedAt，因此计时连续进行。
+  // 直接重选套餐视为纠正原套餐：计时连续，先付款金额同步改为新套餐基础价。
+  // 明确点击“加1小时”产生的 t.extra 不受影响，仍在结账时单独计算。
   t.packageIndex = nextIndex;
   if(t.customPackage) t.customPackage.enabled = false;
+  const correctedPackage = getPackage(t);
+
+  if(t.start && t.payTiming === "prepaid"){
+    t.startedPackageName = correctedPackage.name;
+    t.startedPackagePrice = Number(correctedPackage.price || 0);
+    t.paidJPY = Number(correctedPackage.price || 0);
+    t.paidRMB = getRMB(t.paidJPY);
+    t.paidAt = Date.now();
+  }
 
   render();
-  emergencySaveState({db,ref,state,action:"change_running_package"});
+  emergencySaveState({db,ref,state,action:"correct_running_package"});
 
   if(t.start){
-    await createOrUpdateRecord(t);
+    const record = await createOrUpdateRecord(t);
+    if(t.payTiming === "prepaid"){
+      consolidatePayment(record,{
+        amountJPY:Number(correctedPackage.price || 0),
+        pay:t.pay || record.pay || "未记录",
+        reason:"套餐预付款",
+        note:"运行中重选套餐，按新套餐纠正"
+      });
+      record.packageName = correctedPackage.name;
+      record.packageMinutes = correctedPackage.unlimited
+        ? "不限时"
+        : correctedPackage.minutes;
+      record.packagePrice = Number(correctedPackage.price || 0);
+      record.originalJPY = getOriginalJPY(t);
+      record.paidJPY = sumPaymentsJPY(record.payments);
+      record.totalJPY = record.paidJPY;
+      record.totalRMB = sumPaymentsRMB(record.payments);
+      record.dueJPY = Math.max(0, record.originalJPY - record.paidJPY);
+      record.pay = getPaymentSummary(record.payments);
+      record.currency = getCurrencySummary(record.payments);
+      record.updatedAt = Date.now();
+      emergencySaveRecord({db,ref,record});
+    }
   }
 }
 

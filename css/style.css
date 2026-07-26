@@ -232,6 +232,23 @@ button:active{
   border:2px solid var(--danger);
 }
 
+/* 每续时1小时增加一层清晰的彩色外框，最多显示五层。 */
+.card.extension-layers-1{
+  box-shadow:0 0 0 4px #27ae60,var(--shadow);
+}
+.card.extension-layers-2{
+  box-shadow:0 0 0 4px #27ae60,0 0 0 8px #2f80ed,var(--shadow);
+}
+.card.extension-layers-3{
+  box-shadow:0 0 0 4px #27ae60,0 0 0 8px #2f80ed,0 0 0 12px #9b51e0,var(--shadow);
+}
+.card.extension-layers-4{
+  box-shadow:0 0 0 4px #27ae60,0 0 0 8px #2f80ed,0 0 0 12px #9b51e0,0 0 0 16px #f2994a,var(--shadow);
+}
+.card.extension-layers-5{
+  box-shadow:0 0 0 4px #27ae60,0 0 0 8px #2f80ed,0 0 0 12px #9b51e0,0 0 0 16px #f2994a,0 0 0 20px #eb5757,var(--shadow);
+}
+
 .card h3{
   margin:0 0 12px;
   font-size:22px;

@@ -1,4 +1,4 @@
-﻿import { db } from "./firebase.js?v=4.0.38";
+﻿import { db } from "./firebase.js?v=4.0.39";
 import {
   doc,
   getDoc,

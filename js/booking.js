@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.33";
+﻿import { db } from "./firebase.js?v=4.0.34";
 import { doc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.33";
-import { resetTable } from "./common.js?v=4.0.33";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.33";
-import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.33";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, saveRecordSafely, atomicCheckInBooking } from "./safe-state.js?v=4.0.34";
+import { resetTable } from "./common.js?v=4.0.34";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup } from "./group-model.js?v=4.0.34";
+import { jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.34";
 
 const ref = doc(db, "shop", "main");
 let state = null;
@@ -981,7 +981,7 @@ function startBookingAutoRefresh(){
       });
     }).catch(error=>console.warn("预约自动刷新读取本机状态失败", error));
 
-  },5000);
+  },3000);
 }
 
 document.addEventListener("visibilitychange",()=>{

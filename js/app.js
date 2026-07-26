@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.33";
+import { db } from "./firebase.js?v=4.0.34";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.33";
-/*import { formatTime } from "./common.js?v=4.0.33";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.33";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.33";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.33";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, atomicAdjustTableExtra, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.34";
+/*import { formatTime } from "./common.js?v=4.0.34";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.34";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.34";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod } from "./business-day.js?v=4.0.34";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -101,7 +101,7 @@ window.addEventListener(
     }
   }
 );
-// iPad 桌面网页偶尔会只停留在 Firestore 缓存。每 5 秒主动向服务器核对一次，
+// iPad 桌面网页偶尔会只停留在 Firestore 缓存。每 3 秒主动向服务器核对一次，
 // 确保手机、iPad 和其他终端都能看到同一份最新桌位状态。
 async function refreshSharedStateFromServer(){
   if(!navigator.onLine) return;
@@ -1147,8 +1147,6 @@ filteredTables.forEach(({t,i})=>{
       </button>
 
       <div class="table-card-details">
-      <h3 class="table-title-row"><span>${t.name}</span>${(t.start || t.type || t.recordId) && t.groupId ? `<span class="table-group-id">${t.groupId}</span>` : ""}</h3>
-
     <select onpointerdown="beginTableInteraction()" onfocus="beginTableInteraction()" onchange="setPackage(${i},this.value);finishTableInteractionSoon()">
   ${state.packages.map((pkg,idx)=>`
     <option value="${idx}" ${idx===t.packageIndex ? "selected" : ""}>

@@ -1603,7 +1603,7 @@ export function installConnectionGuard(){
     if(navigator.onLine){
       window.dispatchEvent(new CustomEvent("chiptune-sync-tick",{detail:{online:true}}));
     }
-  },5000);
+  },3000);
   update();
 }
 
@@ -2516,7 +2516,7 @@ export function subscribeAllRecords({
   const scheduleRetry = ()=>{
     clearTimeout(retryTimer);
     if(!stopped){
-      retryTimer = setTimeout(loadAllFromServer,5000);
+      retryTimer = setTimeout(loadAllFromServer,3000);
     }
   };
 
@@ -2673,7 +2673,7 @@ export function subscribeAllRecords({
       console.warn("完整历史账单读取失败",err);
       const local = await loadLocalRecords().catch(()=>[]);
       const reason = String(err?.message || err || "未知错误");
-      onStatus?.(`已保存 ${local.length} 条到本机｜读取中断：${reason}｜5秒后继续`);
+      onStatus?.(`已保存 ${local.length} 条到本机｜读取中断：${reason}｜3秒后继续`);
       scheduleRetry();
     }finally{
       loadingAll = false;

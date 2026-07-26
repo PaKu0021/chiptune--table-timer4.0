@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.45";
+import { db } from "./firebase.js?v=4.0.46";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.45";
-/*import { formatTime } from "./common.js?v=4.0.45";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.45";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.45";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.45";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.46";
+/*import { formatTime } from "./common.js?v=4.0.46";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.46";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.46";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.46";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -416,6 +416,8 @@ function normalizeAppState(nextState){
     if(t.paidJPY === undefined) t.paidJPY = 0;
     if(t.paidRMB === undefined) t.paidRMB = 0;
     if(t.paidAt === undefined) t.paidAt = null;
+    if(t.startedPackageName === undefined) t.startedPackageName = "";
+    if(t.startedPackagePrice === undefined) t.startedPackagePrice = null;
     if(t.type === undefined) t.type = "";
     if(t.lastAction === undefined) t.lastAction = "";
     if(t.recordId === undefined) t.recordId = null;
@@ -673,6 +675,61 @@ function getOriginalJPY(t){
   const totalMinutes = baseMinutes + extraMinutes;
 
   return calcPriceByTotalMinutes(totalMinutes);
+}
+
+function getCheckoutAdjustment(t){
+  const currentPackage = getPackage(t);
+  const initialPrice = t.startedPackagePrice !== null &&
+    Number.isFinite(Number(t.startedPackagePrice))
+    ? Number(t.startedPackagePrice)
+    : Number(t.paidJPY || 0);
+  const packageChanged =
+    (
+      Boolean(t.startedPackageName) &&
+      (
+      t.startedPackageName !== currentPackage.name ||
+      initialPrice !== Number(currentPackage.price || 0)
+      )
+    ) ||
+    (
+      !t.startedPackageName &&
+      t.payTiming === "prepaid" &&
+      Boolean(t.paidAt) &&
+      Number(t.extra || 0) === 0 &&
+      Number(t.paidJPY || 0) !== Number(currentPackage.price || 0)
+    );
+  const extended = Number(t.extra || 0) > 0;
+
+  if(packageChanged && extended){
+    return {
+      label:"本次套餐变更及续费补收",
+      paymentLabel:"套餐变更及续费补收付款方式",
+      reason:"套餐变更及续费补收",
+      note:"按结账时最终套餐及续费时长结清"
+    };
+  }
+  if(packageChanged){
+    return {
+      label:"本次套餐变更补收",
+      paymentLabel:"套餐变更补收付款方式",
+      reason:"套餐变更补收",
+      note:"按结账时最终选择的套餐结清差额"
+    };
+  }
+  if(extended){
+    return {
+      label:"本次续费补收",
+      paymentLabel:"续费补收付款方式",
+      reason:"续时补收",
+      note:"离店时结清续时费用"
+    };
+  }
+  return {
+    label:"本次待补收",
+    paymentLabel:"待补收付款方式",
+    reason:"结账补收",
+    note:"按结账时最终选择的套餐结清"
+  };
 }
 
 function roundJPY(jpy){
@@ -1851,6 +1908,8 @@ async function start(i){
   t.lastAction = "start";
 
   const p = getPackage(t);
+  t.startedPackageName = p.name;
+  t.startedPackagePrice = Number(p.price || 0);
   t.payTiming = t.payTiming || "prepaid";
   if(t.payTiming === "prepaid"){
     t.paidJPY = Number(p.price || 0);
@@ -2193,6 +2252,7 @@ function toggleRound(){
 function updateCheckout(){
   const t = state.tables[checkoutIndex];
   const p = getPackage(t);
+  const adjustment = getCheckoutAdjustment(t);
 
   const originalJPY = getOriginalJPY(t);
   const dueJPY = Math.max(0, originalJPY - Number(t.paidJPY || 0));
@@ -2205,11 +2265,11 @@ function updateCheckout(){
     类型：${t.type === "booking" ? "预约" : "Walk-in"}<br><br>
 
 <label style="font-weight:900;display:block;margin:10px 0 6px;">
-  ${finalJPY > 0 ? "本次续费补收付款方式" : "本次无需补收"}
+  ${finalJPY > 0 ? adjustment.paymentLabel : "本次无需补收"}
 </label>
 
 <select id="checkoutPay" ${finalJPY === 0 ? "disabled" : ""}>
-  <option value="">${finalJPY === 0 ? "直接结账" : "请选择【续费补收】付款方式"}</option>
+  <option value="">${finalJPY === 0 ? "直接结账" : `请选择【${adjustment.label.replace("本次","")}】付款方式`}</option>
   <option value="现金">现金</option>
   <option value="PayPay">PayPay</option>
   <option value="微信">微信</option>
@@ -2217,7 +2277,7 @@ function updateCheckout(){
 </select>
 
 <div class="pay-tip">
-  点击开始时已记录套餐费；结账只处理续费产生的补收。退款请使用桌位上的独立“退款”按钮。
+  点击开始时已记录当时的套餐费；结账总价以当前最终选择的套餐为准，并结清套餐变更或续费产生的差额。退款请使用桌位上的独立“退款”按钮。
 </div>
 <div class="pay-tip">币种按付款方式自动确定：现金/PayPay 为日元，微信/支付宝为人民币。</div>
   `;
@@ -2225,7 +2285,7 @@ function updateCheckout(){
   document.getElementById("checkoutAmount").innerHTML = `
     当前应收：¥${originalJPY.toLocaleString()}<br>
     已收净额：¥${Number(t.paidJPY || 0).toLocaleString()}<br><br>
-    本次续费补收：<span id="checkoutDiffText">¥${finalJPY.toLocaleString()}</span><br>
+    ${adjustment.label}：<span id="checkoutDiffText">¥${finalJPY.toLocaleString()}</span><br>
     人民币参考：<span id="checkoutRmbText">¥${totalRMB.toLocaleString()}</span><br>
     <label>备注</label>
     <input id="checkoutNote" placeholder="例：续费1小时">
@@ -2253,9 +2313,10 @@ async function confirmCheckout(){
   const rawDiffJPY = Math.max(0, finalChargeJPY - paidBeforeJPY);
   const finalJPY = useRound ? roundJPY(rawDiffJPY) : rawDiffJPY;
   const finalSettlementJPY = paidBeforeJPY + finalJPY;
+  const adjustment = getCheckoutAdjustment(t);
 
   if(finalJPY > 0 && !pay){
-    alert("本次有续费补收，请选择付款方式");
+    alert(`${adjustment.label}，请选择付款方式`);
     return;
   }
 
@@ -2305,8 +2366,8 @@ async function confirmCheckout(){
     settleRecordToFinalAmount(record,{
       finalAmountJPY:finalSettlementJPY,
       pay,
-      reason:"续时补收",
-      note:note || "离店时结清续时费用"
+      reason:adjustment.reason,
+      note:note || adjustment.note
     });
 
     const paymentTotalJPY = sumPaymentsJPY(record.payments);

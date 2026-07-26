@@ -1,4 +1,4 @@
-﻿import { RMB_PER_JPY } from "./business-day.js?v=4.0.41";
+﻿import { RMB_PER_JPY, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.42";
 
 
 const raw = sessionStorage.getItem("cashier_print_data");
@@ -13,7 +13,7 @@ const rows = payload.rows || [];
 
 function normalizePayments(r){
   if(r.payments){
-    return r.payments;
+    return repairRecordPaymentAmounts(r).record.payments;
   }
 
   const amount = Number(r.totalJPY || r.jpy || 0);

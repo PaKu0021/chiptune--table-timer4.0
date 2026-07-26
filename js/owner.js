@@ -1,9 +1,9 @@
-﻿import { db } from "./firebase.js?v=4.0.41";
-import { RMB_PER_JPY } from "./business-day.js?v=4.0.41";
+﻿import { db } from "./firebase.js?v=4.0.42";
+import { RMB_PER_JPY } from "./business-day.js?v=4.0.42";
 
 import { doc, onSnapshot, collection, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.41";
-import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.41";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, loadLocalRecords, mergeRecordLists, saveRecordSafely, deleteRecordSafely, subscribeAllRecords } from "./safe-state.js?v=4.0.42";
+import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.42";
 
 const ref = doc(db,"shop","main");
 const recordsRef = collection(db,"records");
@@ -35,8 +35,29 @@ let chartHitPoints = [];
 let recordsTimeSortDirection = "desc";
 let packagePanelOpen = false;
 let records = [];
+const repairingPaymentAmountRecords = new Set();
+
+function schedulePaymentAmountRepairs(list){
+  for(const rawRecord of list || []){
+    if(!rawRecord?.id) continue;
+    const repaired = repairRecordPaymentAmounts(rawRecord);
+    if(!repaired.changed || repairingPaymentAmountRecords.has(String(rawRecord.id))) continue;
+
+    const record = {
+      ...repaired.record,
+      jpyAmountsAutoRepairedAt:Date.now()
+    };
+    repairingPaymentAmountRecords.add(String(rawRecord.id));
+    records = mergeRecordLists(records,[record]);
+    saveRecordSafely({db,ref,record})
+      .catch(error=>console.warn("人民币付款日元换算补全失败",error))
+      .finally(()=>repairingPaymentAmountRecords.delete(String(rawRecord.id)));
+  }
+}
+
 loadLocalRecords().then(localRecords=>{
   records = mergeRecordLists(records, localRecords);
+  schedulePaymentAmountRepairs(records);
   if(state) render();
 }).catch(err=>console.warn("读取本机收银记录失败",err));
 
@@ -87,7 +108,11 @@ renderBusinessHours();
 
 subscribeAllRecords({
   db,
-  onChange:list=>{ records=list; if(state) render(); }
+  onChange:list=>{
+    records=list.map(record=>repairRecordPaymentAmounts(record).record);
+    schedulePaymentAmountRepairs(list);
+    if(state) render();
+  }
 });
 
 function save(action="owner_update"){
@@ -139,7 +164,7 @@ function getFilteredRecords(){
 
 
 function normalizePayments(r){
-  if(Array.isArray(r.payments)) return r.payments;
+  if(Array.isArray(r.payments)) return repairRecordPaymentAmounts(r).record.payments;
 
   const amount = Number(r.totalJPY || r.jpy || 0);
 

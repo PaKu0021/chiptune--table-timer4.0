@@ -8,6 +8,93 @@ export function currencyForPaymentMethod(method){
   return ["微信","支付宝"].includes(String(method || "")) ? "人民币" : "日元";
 }
 
+function isRmbPayment(payment = {}, record = {}){
+  const method = payment.pay || record.pay || "";
+  return currencyForPaymentMethod(method) === "人民币" ||
+    payment.currency === "人民币" ||
+    record.currency === "人民币";
+}
+
+export function inferPaymentJPY(payment = {}, record = {}, paymentCount = 1){
+  const stored = Number(payment.amountJPY || 0);
+  if(stored !== 0) return stored;
+  if(!isRmbPayment(payment,record)) return 0;
+
+  const amountRMB = Number(payment.amountRMB || 0);
+  if(amountRMB === 0) return 0;
+
+  const sign = amountRMB < 0 ? -1 : 1;
+  const absoluteRMB = Math.abs(amountRMB);
+  const directCandidates = [
+    payment.expectedJPY,
+    payment.originalJPY
+  ];
+
+  if(Number(paymentCount || 0) === 1){
+    directCandidates.push(
+      record.originalJPY,
+      record.packagePrice,
+      record.paidJPY,
+      record.totalJPY,
+      record.jpy
+    );
+  }
+
+  for(const value of directCandidates){
+    const candidate = Math.abs(Number(value || 0));
+    if(candidate > 0 && jpyToRmb(candidate) === absoluteRMB){
+      return sign * candidate;
+    }
+  }
+
+  // 人民币金额是由 Math.floor(日元 × 0.044) 得到，无法百分百反推原数。
+  // 店内套餐和补收以百日元为单位，取最近的百日元可还原 145→3300。
+  const reverse = absoluteRMB / RMB_PER_JPY;
+  return sign * Math.max(100,Math.round(reverse / 100) * 100);
+}
+
+export function repairRecordPaymentAmounts(record = {}){
+  if(!Array.isArray(record.payments) || !record.payments.length){
+    return {record,changed:false};
+  }
+
+  let changed = false;
+  const paymentCount = record.payments.filter(payment=>
+    Number(payment?.amountJPY || 0) !== 0 ||
+    Number(payment?.amountRMB || 0) !== 0
+  ).length || record.payments.length;
+
+  const payments = record.payments.map(payment=>{
+    const amountJPY = inferPaymentJPY(payment,record,paymentCount);
+    if(Number(payment?.amountJPY || 0) === 0 && amountJPY !== 0){
+      changed = true;
+      return {
+        ...payment,
+        amountJPY,
+        jpyAmountAutoRepaired:true
+      };
+    }
+    return payment;
+  });
+
+  if(!changed) return {record,changed:false};
+
+  const next = {...record,payments};
+  const totalJPY = payments.reduce(
+    (sum,payment)=>sum + Number(payment?.amountJPY || 0),
+    0
+  );
+
+  if(Number(next.totalJPY || 0) === 0) next.totalJPY = totalJPY;
+  if(Number(next.paidJPY || 0) === 0) next.paidJPY = totalJPY;
+  if(next.dueJPY !== undefined){
+    next.dueJPY = Math.max(0,Number(next.originalJPY || next.packagePrice || 0) - totalJPY);
+  }
+  next.jpyAmountsAutoRepaired = true;
+
+  return {record:next,changed:true};
+}
+
 
 export function dateKey(value = Date.now()){
   const d = value instanceof Date ? new Date(value.getTime()) : new Date(value);

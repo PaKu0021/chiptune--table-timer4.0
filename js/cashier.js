@@ -1,8 +1,8 @@
-﻿import { db } from "./firebase.js?v=4.0.41";
-import { RMB_PER_JPY } from "./business-day.js?v=4.0.41";
+﻿import { db } from "./firebase.js?v=4.0.42";
+import { RMB_PER_JPY, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.42";
 
-import { loadLocalRecords, mergeRecordLists, saveRecordSafely, installConnectionGuard, flushPending, subscribeAllRecords } from "./safe-state.js?v=4.0.41";
-import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.41";
+import { loadLocalRecords, mergeRecordLists, saveRecordSafely, installConnectionGuard, flushPending, subscribeAllRecords } from "./safe-state.js?v=4.0.42";
+import { dateKey, getCurrentBusinessDate, getRecordBusinessDate, getRecordTimestamp, businessDateToLocalDate } from "./business-day.js?v=4.0.42";
 
 
 import {
@@ -129,7 +129,7 @@ function get90DaysAgo(){
 }
 
 function normalizePayments(r){
-  if(Array.isArray(r.payments)) return r.payments;
+  if(Array.isArray(r.payments)) return repairRecordPaymentAmounts(r).record.payments;
 
   const amount = Number(r.totalJPY || r.jpy || 0);
 

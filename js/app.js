@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.43";
+import { db } from "./firebase.js?v=4.0.44";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.43";
-/*import { formatTime } from "./common.js?v=4.0.43";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.43";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.43";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.43";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.44";
+/*import { formatTime } from "./common.js?v=4.0.44";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.44";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.44";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.44";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -13,6 +13,9 @@ const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpU
 
 let state = null;
 let lastAppliedAppStateKey = "";
+let syncBatchActive = false;
+let pendingSyncBatchState = null;
+let pendingSyncBatchSource = "";
 installConnectionGuard();
 
 loadLocalState()
@@ -35,6 +38,22 @@ window.addEventListener("chiptune-online-change",e=>{
 });
 window.addEventListener("chiptune-sync-tick",()=>{
   flushPending({db,ref}).catch(err=>console.warn("定时同步失败",err));
+});
+window.addEventListener("chiptune-sync-batch",event=>{
+  if(event.detail?.phase === "start"){
+    syncBatchActive = true;
+    return;
+  }
+  if(event.detail?.phase !== "end") return;
+
+  syncBatchActive = false;
+  const pending = pendingSyncBatchState;
+  const source = pendingSyncBatchSource || "批量同步完成";
+  pendingSyncBatchState = null;
+  pendingSyncBatchSource = "";
+  if(pending){
+    applyIncomingAppState(pending,source);
+  }
 });
 
 // 本机事务写入云端成功后，立即采用服务器最终合并状态。
@@ -413,6 +432,18 @@ function applyIncomingAppState(
     !incoming ||
     typeof incoming !== "object"
   ){
+    return;
+  }
+
+  if(
+    syncBatchActive &&
+    (
+      String(source).startsWith("Firestore") ||
+      source === "主动服务器刷新"
+    )
+  ){
+    pendingSyncBatchState = structuredClone(incoming);
+    pendingSyncBatchSource = source;
     return;
   }
 

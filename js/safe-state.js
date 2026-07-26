@@ -234,9 +234,34 @@ function broadcastState(state, action = "state_update"){
   }
 }
 
+function broadcastSyncBatch(phase, total = 0){
+  const detail = {
+    syncBatch:true,
+    phase,
+    total:Number(total || 0),
+    sentAt:Date.now(),
+    deviceId:getDeviceId()
+  };
+  window.dispatchEvent(new CustomEvent("chiptune-sync-batch",{detail}));
+  try{
+    stateChannel?.postMessage(detail);
+  }catch(error){
+    console.warn("跨页面批量同步状态广播失败",error);
+  }
+}
+
 stateChannel?.addEventListener(
   "message",
   event=>{
+    if(event.data?.syncBatch){
+      window.dispatchEvent(
+        new CustomEvent(
+          "chiptune-sync-batch",
+          {detail:event.data}
+        )
+      );
+      return;
+    }
     if(!event.data?.state) return;
 
     window.dispatchEvent(
@@ -1282,7 +1307,7 @@ function materializeEntityIntoMain(main,item,nextEntity){
   out._sync={revision:Number(out?._sync?.revision||0)+1,updatedAt:Date.now(),deviceId:getDeviceId(),operationId:item.id,architecture:"entity-v4"};
   return out;
 }
-async function flushEntityOperation({db,ref},item){
+async function flushEntityOperation({db,ref},item,{suppressBroadcast=false}={}){
   let materialized=null;
   await runTransaction(db,async tx=>{
     const opRef=operationRef(db,item.id);
@@ -1324,16 +1349,19 @@ async function flushEntityOperation({db,ref},item){
   if(materialized){
     baseline=clone(materialized); await writeLocalState(materialized,materialized);
     writeShadow(STATE_SHADOW,{state:clone(materialized),cloudBaseline:clone(materialized),savedAt:Date.now(),deviceId:getDeviceId()});
-    broadcastState(materialized,item.action||"entity_sync");
+    if(!suppressBroadcast){
+      broadcastState(materialized,item.action||"entity_sync");
+    }
   }
+  return materialized;
 }
 
 async function enqueue(local,base,action){
   return enqueueEntityOperations(local,base,action);
 }
 
-async function flushOne({db,ref}, item){
-  if(item?.syncV4 || item?.syncV3) return flushEntityOperation({db,ref},item);
+async function flushOne({db,ref}, item, options={}){
+  if(item?.syncV4 || item?.syncV3) return flushEntityOperation({db,ref},item,options);
   throw new Error("检测到旧版整状态队列，请先执行迁移或清除旧待同步队列");
 }
 
@@ -1523,41 +1551,56 @@ export async function flushPending({db,ref}){
     }
 
     setSyncStatus("syncing",`● 本机已保存 · 正在上传 ${total} 项`);
+    broadcastSyncBatch("start",total);
 
-    // 同一设备的计时器、预约页、账单页共用一个 IndexedDB 队列。
-    // 必须在跨标签页锁内按顺序上传，禁止多个页面同时重放或删除同一操作。
-    for(const item of items){
-      if(!navigator.onLine) break;
-      try{
-        await withTimeout(flushOne({db,ref},item),CLOUD_SYNC_TIMEOUT_MS,"桌位状态同步");
-      }catch(error){
-        if(error?.code==="sync-conflict"){
-          await quarantineConflict(db,item,error,"queue");
-          console.warn("操作发生并发冲突，已隔离等待人工确认",item,error);
-          continue;
+    let latestMaterializedState = null;
+    try{
+      // 同一设备的计时器、预约页、账单页共用一个 IndexedDB 队列。
+      // 必须在跨标签页锁内按顺序上传，禁止多个页面同时重放或删除同一操作。
+      // 补传期间不逐项广播完整桌位状态，避免每上传一项就重建一次全部桌卡。
+      for(const item of items){
+        if(!navigator.onLine) break;
+        try{
+          const materialized = await withTimeout(
+            flushOne({db,ref},item,{suppressBroadcast:true}),
+            CLOUD_SYNC_TIMEOUT_MS,
+            "桌位状态同步"
+          );
+          if(materialized) latestMaterializedState = materialized;
+        }catch(error){
+          if(error?.code==="sync-conflict"){
+            await quarantineConflict(db,item,error,"queue");
+            console.warn("操作发生并发冲突，已隔离等待人工确认",item,error);
+            continue;
+          }
+          setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
+          throw error;
         }
+      }
+      try{
+        await flushRecordQueueConcurrently({db},recordItems,completed=>{
+          if(completed === recordItems.length || completed % 10 === 0){
+            setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completed}/${total} 项`);
+          }
+        });
+      }catch(error){
         setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
         throw error;
       }
-    }
-    try{
-      await flushRecordQueueConcurrently({db},recordItems,completed=>{
-        if(completed === recordItems.length || completed % 10 === 0){
-          setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completed}/${total} 项`);
-        }
-      });
-    }catch(error){
-      setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
-      throw error;
-    }
 
-    const left = (await queueAll("queue")).length + (await queueAll("recordQueue")).length;
-    if(left){
-      setSyncStatus("pending",`● 已保存本机 · ${left} 项等待上传`);
-    }else if(idbStateDegraded || idbRecordsDegraded){
-      setSyncStatus("synced","● 云端已同步 · 本机使用应急缓存");
-    }else{
-      setSyncStatus("synced");
+      const left = (await queueAll("queue")).length + (await queueAll("recordQueue")).length;
+      if(left){
+        setSyncStatus("pending",`● 已保存本机 · ${left} 项等待上传`);
+      }else if(idbStateDegraded || idbRecordsDegraded){
+        setSyncStatus("synced","● 云端已同步 · 本机使用应急缓存");
+      }else{
+        setSyncStatus("synced");
+      }
+    }finally{
+      if(latestMaterializedState){
+        broadcastState(latestMaterializedState,"sync_batch_complete");
+      }
+      broadcastSyncBatch("end",total);
     }
   };
 

@@ -1,6 +1,6 @@
-﻿import { db } from "./firebase.js?v=4.0.35";
+﻿import { db } from "./firebase.js?v=4.0.37";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { loadLocalState } from "./safe-state.js?v=4.0.35";
+import { loadLocalState } from "./safe-state.js?v=4.0.37";
 
 const ref = doc(db, "shop", "main");
 const gridEl = document.getElementById("printGrid");
@@ -23,7 +23,15 @@ function getSlots(hours){
     slots.push(`${String(h).padStart(2,"0")}:00`);
     slots.push(`${String(h).padStart(2,"0")}:30`);
   }
+  // 最后一项是营业结束边界，只用于计算最后一行的结束时间。
+  slots.push(`${String(hours.close).padStart(2,"0")}:00`);
   return slots;
+}
+
+function timeToMinutes(value){
+  const [hour,minute] = String(value || "").split(":").map(Number);
+  if(!Number.isFinite(hour) || !Number.isFinite(minute)) return NaN;
+  return hour * 60 + minute;
 }
 
 function parseLocalDate(dateText){
@@ -92,23 +100,31 @@ function renderState(state){
       <tbody>
   `;
 
-  slots.forEach((time,rowIndex)=>{
+  slots.slice(0,-1).forEach((time,rowIndex)=>{
     html += `<tr><td class="print-time">${time}</td>`;
 
     tables.forEach((table,tableIndex)=>{
       const booking = bookings.find(item=>{
         const tableIndexes = normalizeTableIndexes(item);
-        const startRow = slots.indexOf(item?.startTime);
-        const endRow = slots.indexOf(item?.endTime);
-        const realEndRow = endRow > startRow ? endRow : startRow + 1;
+        const bookingStart = timeToMinutes(item?.startTime);
+        const bookingEnd = timeToMinutes(item?.endTime);
+        const rowStart = timeToMinutes(slots[rowIndex]);
+        const rowEnd = timeToMinutes(slots[rowIndex + 1]);
 
-        return startRow >= 0 &&
+        return Number.isFinite(bookingStart) &&
+               Number.isFinite(bookingEnd) &&
+               bookingEnd > bookingStart &&
                tableIndexes.includes(tableIndex) &&
-               rowIndex >= startRow &&
-               rowIndex < realEndRow;
+               bookingStart < rowEnd &&
+               bookingEnd > rowStart;
       });
 
-      const isStart = booking && slots.indexOf(booking.startTime) === rowIndex;
+      const bookingStart = timeToMinutes(booking?.startTime);
+      const rowStart = timeToMinutes(slots[rowIndex]);
+      const rowEnd = timeToMinutes(slots[rowIndex + 1]);
+      const isStart = booking &&
+        bookingStart >= rowStart &&
+        bookingStart < rowEnd;
       const customer = booking?.name || booking?.customer || "";
       const phone = booking?.phone || booking?.phoneLast4 || "";
       const label = isStart

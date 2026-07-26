@@ -61,6 +61,8 @@ export function resetTable(name){
     paidJPY:0,
     paidRMB:0,
     paidAt:null,
+    startedPackageName:"",
+    startedPackagePrice:null,
 
     currency:"日元",
 

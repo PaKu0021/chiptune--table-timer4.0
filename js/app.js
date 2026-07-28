@@ -1475,7 +1475,7 @@ ${t.start ? `
             撤回1小时
           </button>
         </div>
-      `}
+      ` : ""}
       
       <select id="pay-timing-${i}" onpointerdown="beginTableInteraction(${i})" onfocus="beginTableInteraction(${i})" onchange="setPayTiming(${i},this.value);finishTableInteractionSoon()" ${t.start ? "disabled" : ""}>
        <option value="prepaid" ${t.payTiming==="prepaid"?"selected":""}>先付款</option>

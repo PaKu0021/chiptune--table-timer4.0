@@ -44,9 +44,13 @@ export async function allocateGroupId(db, groups = [], timestamp = Date.now()){
   const counterId = dateKey.replaceAll("/","-");
   const localId = nextLocalGroupId(groups,timestamp);
 
-  // 某些现有 Firebase 规则只允许访问 shop/main，访问新集合时可能长时间重试。
-  // 最多等待 3 秒，之后立即使用本机顺序编号，避免“保存组”按钮看起来没有反应。
-  const timeout = new Promise(resolve=>setTimeout(()=>resolve(localId),300));
+  // 组编号必须由云端事务唯一分配。本机顺序编号只能用于计算事务下限，
+  // 不能在网络较慢时直接返回，否则两台设备可能同时拿到同一个编号。
+  const timeout = new Promise((_,reject)=>setTimeout(()=>{
+    const error = new Error("云端组编号分配超时，请确认网络后重试");
+    error.code = "group-id-timeout";
+    reject(error);
+  },3000));
   const cloudAllocation = runTransaction(db, async transaction=>{
     const counterRef = doc(db,"groupCounters",counterId);
     const snap = await transaction.get(counterRef);
@@ -57,9 +61,6 @@ export async function allocateGroupId(db, groups = [], timestamp = Date.now()){
     const sequence = Math.max(cloudNext,localNext);
     transaction.set(counterRef,{dateKey,lastSequence:sequence,updatedAt:Date.now()},{merge:true});
     return `${dateKey}_${counterToken(sequence)}`;
-  }).catch(error=>{
-    console.warn("组编号云端分配失败，使用本机顺序编号",error);
-    return localId;
   });
 
   return Promise.race([cloudAllocation,timeout]);

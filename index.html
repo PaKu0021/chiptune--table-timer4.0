@@ -75,9 +75,9 @@
 
 
 <script type="module">
-import { db } from "./js/firebase.js?v=4.0.49";
-import { loadLocalState, reconcileCloudState, loadLocalRecords, mergeRecordLists, installConnectionGuard, flushPending, subscribeAllRecords, emergencySaveRecord, emergencySaveState } from "./js/safe-state.js?v=4.0.49";
-import { getCurrentBusinessDate, getRecordBusinessDate } from "./js/business-day.js?v=4.0.49";
+import { db } from "./js/firebase.js?v=4.0.51";
+import { loadLocalState, reconcileCloudState, loadLocalRecords, mergeRecordLists, installConnectionGuard, flushPending, subscribeAllRecords } from "./js/safe-state.js?v=4.0.51";
+import { getCurrentBusinessDate, getRecordBusinessDate } from "./js/business-day.js?v=4.0.51";
 import { doc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 const ref = doc(db,"shop","main");
 const recordsRef = collection(db,"records");
@@ -125,115 +125,8 @@ function getCalendarDate(){
 }
 
 
-let activeRevenueRepairRunning = false;
-let activeRevenueRepairDone = false;
-
-function getTablePackage(table){
-  if(table?.customPackage) return table.customPackage;
-  return (homeState?.packages || [])[Number(table?.packageIndex || 0)] || {};
-}
-
-async function repairActivePrepaidRevenue(){
-  if(activeRevenueRepairRunning || activeRevenueRepairDone || !homeState) return;
-  activeRevenueRepairRunning = true;
-  try{
-    const tables = Array.isArray(homeState.tables) ? homeState.tables : [];
-    let stateChanged = false;
-    let repairedCount = 0;
-
-    for(const table of tables){
-      if(!table?.start || String(table.payTiming || "prepaid") !== "prepaid") continue;
-
-      const pkg = getTablePackage(table);
-      const packagePrice = Math.max(0,Number(pkg?.price || 0));
-      const expectedPaid = Math.max(0,Number(table.paidJPY || 0),packagePrice);
-      if(expectedPaid <= 0) continue;
-
-      let record = allRecords.find(r=>String(r?.id || "") === String(table.recordId || ""));
-      const currentPaid = record ? sumPaymentsJPY(record) : 0;
-      if(record && currentPaid > 0) continue;
-
-      if(!table.recordId){
-        const visitId = table.visitId || `visit_repair_${Number(table.start)}_${String(table.name || "table").replace(/\s+/g,"_")}`;
-        table.visitId = visitId;
-        table.recordId = `record_${visitId}`;
-        stateChanged = true;
-      }
-
-      if(Number(table.paidJPY || 0) <= 0){
-        table.paidJPY = expectedPaid;
-        table.paidRMB = 0;
-        table.paidAt = Number(table.start || Date.now());
-        stateChanged = true;
-      }
-
-      const payment = {
-        id:`repair_prepaid_${table.recordId}`,
-        operationId:`repair_prepaid_${table.recordId}`,
-        type:"收入",
-        reason:"套餐预付款",
-        pay:table.pay || "未记录",
-        currency:(table.pay === "微信" || table.pay === "支付宝") ? "人民币" : "日元",
-        amountJPY:expectedPaid,
-        amountRMB:(table.pay === "微信" || table.pay === "支付宝") ? Math.round(expectedPaid * 0.044) : 0,
-        note:"历史异常账单自动修复",
-        timestamp:Number(table.start || Date.now())
-      };
-
-      record = {
-        ...(record || {}),
-        id:String(table.recordId),
-        visitId:table.visitId || record?.visitId || "",
-        timestamp:Number(table.start || record?.timestamp || Date.now()),
-        startAt:Number(table.start || record?.startAt || Date.now()),
-        businessDate:getRecordBusinessDate({timestamp:Number(table.start || Date.now()),startAt:Number(table.start || Date.now())}),
-        time:new Date(Number(table.start || Date.now())).toLocaleString(),
-        tableName:table.name || record?.tableName || "",
-        customerName:table.customer?.name || record?.customerName || "",
-        phoneLast4:table.customer?.phoneLast4 || record?.phoneLast4 || "",
-        customerType:table.type || record?.customerType || "walkin",
-        packageName:pkg?.name || record?.packageName || "",
-        packageMinutes:pkg?.unlimited ? "不限时" : Number(pkg?.minutes || record?.packageMinutes || 0),
-        packagePrice,
-        originalJPY:Math.max(packagePrice,Number(record?.originalJPY || 0)),
-        payments:[payment],
-        paidJPY:expectedPaid,
-        dueJPY:Math.max(0,packagePrice-expectedPaid),
-        totalJPY:expectedPaid,
-        totalRMB:Number(payment.amountRMB || 0),
-        pay:payment.pay,
-        currency:payment.currency,
-        payTiming:"prepaid",
-        paidStatus:"已结清",
-        status:"进行中",
-        closed:false,
-        updatedAt:Date.now(),
-        localUpdatedAt:Date.now()
-      };
-
-      emergencySaveRecord({db,ref,record});
-      allRecords = mergeRecordLists(allRecords,[record]);
-      repairedCount++;
-    }
-
-    if(stateChanged){
-      emergencySaveState({db,ref,state:homeState,action:"repair_active_prepaid_revenue"});
-    }
-    if(repairedCount){
-      console.info(`已自动修复 ${repairedCount} 张进行中套餐收款账单`);
-      updateHome();
-    }
-    activeRevenueRepairDone = true;
-  }catch(err){
-    console.warn("进行中账单自动修复失败，将在下次刷新重试",err);
-  }finally{
-    activeRevenueRepairRunning = false;
-  }
-}
-
 function updateHome(){
   if(!homeState) return;
-  repairActivePrepaidRevenue().catch(()=>{});
 
   const tables = homeState.tables || [];
   const bookings = homeState.bookings || [];

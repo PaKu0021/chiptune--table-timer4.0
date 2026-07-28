@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.49";
+import { db } from "./firebase.js?v=4.0.51";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.49";
-/*import { formatTime } from "./common.js?v=4.0.49";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.49";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.49";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.49";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.51";
+/*import { formatTime } from "./common.js?v=4.0.51";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.51";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.51";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.51";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -2092,16 +2092,23 @@ async function start(i){
     // 服务器成功锁定后再建立组，避免双设备同时生成两组。
     const current = state.tables[i];
     if(current && !current.groupId){
-      const groupId = await allocateGroupId(db,state.groups || []);
-      const group = upsertGroup(state,{
-        id:groupId,
-        name:`${current.name}组`,
-        color:current.activeColor || "#B7E4C7",
-        tableIndexes:[i],
-        peopleCount:1,
-        paymentMode:"split"
-      });
-      syncGroupReferences(state,group);
+      try{
+        const groupId = await allocateGroupId(db,state.groups || []);
+        const group = upsertGroup(state,{
+          id:groupId,
+          name:`${current.name}组`,
+          color:current.activeColor || "#B7E4C7",
+          tableIndexes:[i],
+          peopleCount:1,
+          paymentMode:"split"
+        });
+        syncGroupReferences(state,group);
+      }catch(groupError){
+        // 桌位和账单已经由服务器原子确认，不能因为辅助编组失败而撤销计时。
+        // 保持未编组状态，店员之后可在“创建／重组”中安全补建。
+        console.warn("桌位已开始，但云端组编号暂时无法分配",groupError);
+        setSyncStatus("pending","● 桌位已安全开始 · 编组未建立，请稍后重试");
+      }
     }
 
     // 预约签到仅由成功开始的一台设备执行。
@@ -3323,7 +3330,15 @@ async function confirmBatchStart(){
   }
 
   const now = Date.now();
-  const groupId = await allocateGroupId(db,state.groups || []);
+  let groupId = "";
+  try{
+    groupId = await allocateGroupId(db,state.groups || []);
+  }catch(error){
+    console.error("批量开始组编号分配失败",error);
+    setSyncStatus("error","● 批量开始未执行 · 无法取得唯一组编号");
+    alert(error?.message || "无法取得唯一组编号，请确认网络后重试");
+    return;
+  }
   const groupName = document.getElementById("batchGroupName")?.value.trim() || `现场组`;
   const paymentMode = document.getElementById("batchGroupPaymentMode")?.value || "split";
   const group = {

@@ -1,4 +1,4 @@
-﻿import { RMB_PER_JPY, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.48";
+﻿import { RMB_PER_JPY, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.49";
 
 
 const raw = sessionStorage.getItem("cashier_print_data");

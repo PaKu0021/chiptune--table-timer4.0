@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.48";
+import { db } from "./firebase.js?v=4.0.49";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.48";
-/*import { formatTime } from "./common.js?v=4.0.48";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.48";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.48";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.48";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.49";
+/*import { formatTime } from "./common.js?v=4.0.49";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.49";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.49";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.49";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -280,8 +280,9 @@ function newTable(i){
 const defaultState = {
   packages:[
     {name:"1小时", minutes:60, price:1500, extensionPrice:900, unlimited:false},
+    {name:"2小时", minutes:120, price:2800, extensionPrice:900, unlimited:false},
     {name:"3小时", minutes:180, price:3300, extensionPrice:900, unlimited:false},
-    {name:"6小时", minutes:360, price:5500, extensionPrice:800, unlimited:false},
+    {name:"6小时／平日不限时", minutes:360, price:5500, extensionPrice:800, unlimited:false},
     {name:"不限时", minutes:0, price:5500, extensionPrice:0, unlimited:true}
   ],
   tables: Array.from({length:12},(_,i)=>newTable(i+1)),
@@ -385,6 +386,9 @@ function normalizeAppState(nextState){
   ){
     next.packages =
       structuredClone(defaultState.packages);
+  }
+  if(!next.packages.some(p=>!p?.customPricing && Number(p.minutes)===120 && Number(p.price)===2800)){
+    next.packages.push({name:"2小时",minutes:120,price:2800,extensionPrice:900,unlimited:false,customPricing:false});
   }
 
   if(!Array.isArray(next.bookings)){
@@ -632,10 +636,35 @@ function getPackage(t){
   };
 }
 
+function isWeekendTable(t){
+  let date = new Date(Number(t?.start || t?.paidAt || Date.now()));
+  if(!Number.isFinite(date.getTime())) date = new Date();
+  const weekday = new Intl.DateTimeFormat(
+    "en-US",
+    {timeZone:"Asia/Tokyo",weekday:"short"}
+  ).format(date);
+  return weekday === "Sat" || weekday === "Sun";
+}
+
+function regularBaseMinutes(p){
+  // 旧的“5500 不限时”套餐在周末按 6 小时起算，之后每小时 800 日元。
+  if(p?.unlimited && Number(p?.price || 0) === 5500) return 360;
+  return Number(p?.minutes || 0);
+}
+
+function regularTotalMinutes(t,p=getPackage(t)){
+  return regularBaseMinutes(p) + Math.floor(Number(t?.extra || 0) / 60000);
+}
+
 function getLimitMs(t){
   const p = getPackage(t);
-  if(p.unlimited) return Infinity;
-  return Number(p.minutes || 0) * 60 * 1000 + Number(t.extra || 0);
+  if(p.customPricing){
+    if(p.unlimited) return Infinity;
+    return Number(p.minutes || 0) * 60 * 1000 + Number(t.extra || 0);
+  }
+  const totalMinutes = regularTotalMinutes(t,p);
+  if(!isWeekendTable(t) && totalMinutes >= 360) return Infinity;
+  return totalMinutes * 60 * 1000;
 }
 
 function getElapsedMs(t){
@@ -653,7 +682,7 @@ function getRemainMs(t){
   return limit - getElapsedMs(t);
 }
 
-function calcPriceByTotalMinutes(totalMinutes){
+function calcPriceByTotalMinutes(totalMinutes,isWeekend=false){
   const hours = Math.ceil(totalMinutes / 60);
 
   if(hours <= 1) return 1500;
@@ -663,13 +692,13 @@ function calcPriceByTotalMinutes(totalMinutes){
   if(hours === 5) return 5100;
   if(hours === 6) return 5500;
 
-  return 5500 + (hours - 6) * 800;
+  return isWeekend ? 5500 + (hours - 6) * 800 : 5500;
 }
 
 function getOriginalJPY(t){
   const p = getPackage(t);
 
-  if(p.unlimited){
+  if(p.customPricing && p.unlimited){
     return Number(p.price || 0);
   }
 
@@ -680,11 +709,16 @@ function getOriginalJPY(t){
     return Number(p.price || 0) + extraHours * Number(p.extensionPrice || 0);
   }
 
-  const baseMinutes = Number(p.minutes || 0);
-  const extraMinutes = Math.floor(Number(t.extra || 0) / 60000);
-  const totalMinutes = baseMinutes + extraMinutes;
+  return calcPriceByTotalMinutes(
+    regularTotalMinutes(t,p),
+    isWeekendTable(t)
+  );
+}
 
-  return calcPriceByTotalMinutes(totalMinutes);
+function canExtendPackage(t){
+  const p = getPackage(t);
+  if(p.customPricing) return !p.unlimited;
+  return isWeekendTable(t) || regularTotalMinutes(t,p) < 360;
 }
 
 function getCheckoutAdjustment(t){
@@ -1429,13 +1463,13 @@ ${t.start ? `
   <button class="btn-ghost" style="${t.lastAction==="resume" ? "background:#f2c94c;color:#332d24;border-color:#d8a900;" : ""}" onclick="resume(${i})" ${!t.pausedAt ? "disabled" : ""}>继续</button>
 </div>
 
-      ${p.unlimited ? "" : `
+      ${canExtendPackage(t) ? `
         <div class="action-row">
           <button class="${status==="warning" ? "btn-warn" : "btn-main"}" onclick="addHour(${i})">
-            +1小时 → ¥${(p.customPricing
-              ? getOriginalJPY({...t, extra:Number(t.extra || 0) + 3600000})
-              : calcPriceByTotalMinutes((Number(p.minutes || 0) + Math.floor(Number(t.extra || 0) / 60000) + 60))
-            ).toLocaleString()}
+            +1小时 → ¥${getOriginalJPY({
+              ...t,
+              extra:Number(t.extra || 0) + 3600000
+            }).toLocaleString()}
           </button>
           <button class="btn-ghost" onclick="undoHour(${i})" ${Number(t.extra || 0) < 3600000 ? "disabled" : ""}>
             撤回1小时

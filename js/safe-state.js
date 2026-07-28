@@ -1250,6 +1250,19 @@ async function enqueueEntityOperations(local,base,action){
     if(!changed.includes(key)) continue;
     const lm=arrayMapById(local?.[key],prefix), bm=arrayMapById(base?.[key],prefix);
     const ids=new Set([...lm.keys(),...bm.keys()]);
+    /*
+     * Firestore 的离线缓存偶尔会短暂返回“不存在”。旧逻辑随后用空的
+     * defaultState 执行 initialize_state，等价于把云端所有预约逐条标记删除。
+     * 初始化只能补建数据，绝不能删除任何已经存在的实体。
+     */
+    if(action==="initialize_state"){
+      const removed=[...bm.keys()].filter(id=>!lm.has(id));
+      if(removed.length){
+        const error=new Error(`已阻止异常初始化：不会删除 ${removed.length} 个${key}`);
+        error.code="unsafe-initialize-delete";
+        throw error;
+      }
+    }
     for(const id of ids){
       const lv=lm.get(id), bv=bm.get(id);
       if(same(lv,bv)) continue;

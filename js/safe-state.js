@@ -1777,6 +1777,62 @@ async function mirrorRecordEntity(db,record,operationId){
   }
 }
 
+async function mirrorStartedTableIntoMain(db,ref,index,table,operationId){
+  await runTransaction(db,async tx=>{
+    const mainSnap=await tx.get(ref);
+    const main=mainSnap.exists()?clone(mainSnap.data()):{};
+    const tables=Array.isArray(main.tables)?clone(main.tables):[];
+    const current=tables[index]||{};
+    const currentOperationId=String(
+      current?.lastOperationId ||
+      current?._entitySync?.operationId ||
+      ""
+    );
+
+    /*
+     * 兼容视图可能在权威桌位提交后才写入。若 shop/main 已经包含更新的
+     * 另一轮操作，旧的后台任务不能把它覆盖回去。
+     */
+    if(
+      currentOperationId &&
+      currentOperationId!==operationId &&
+      Number(current?._entitySync?.version||0)>=Number(table?._entitySync?.version||0)
+    ){
+      return;
+    }
+
+    tables[index]=clone(table);
+    tx.set(ref,{
+      ...main,
+      tables,
+      _sync:{
+        revision:Number(main?._sync?.revision||0)+1,
+        updatedAt:Date.now(),
+        deviceId:getDeviceId(),
+        action:"atomic_start_table_view",
+        operationId,
+        architecture:"entity-v4"
+      }
+    },{merge:false});
+  });
+}
+
+async function mirrorStartedTableIntoMainWithRetry(db,ref,index,table,operationId){
+  let lastError=null;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      await mirrorStartedTableIntoMain(db,ref,index,table,operationId);
+      return;
+    }catch(error){
+      lastError=error;
+      if(attempt<2){
+        await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export async function atomicStartTable({db,ref,tableIndex,tablePatch,record,timerStartAt,timerEndAt,excludeBookingId=null}){
   const index = Number(tableIndex);
   const tableId = entityDocId("table",index,index);
@@ -1785,41 +1841,28 @@ export async function atomicStartTable({db,ref,tableIndex,tablePatch,record,time
   const localBefore = clone((await loadLocalState().catch(()=>null)) || baseline || {});
   let committedTable = null;
   let startedByThisDevice = false;
-  let operationId = "";
+  const operationId = `atomic_start_${record?.id || index}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
 
   if(!navigator.onLine){
     throw new Error("当前离线，无法确认桌位是否可用，未开始计时");
   }
 
-  // 只锁定当前桌位文档，不再在事务中读取和重写整份 shop/main。
-  // 这样其他设备修改预约、账单或其他桌位时，不会迫使本事务不断重试。
+  /*
+   * 权威事务只读取当前桌位，并原子写入当前桌位与进行中账单。
+   * shop/main 是旧页面使用的兼容视图，不能参与桌位锁定，否则任意设备
+   * 修改预约或其他桌都会让本事务重试，弱网 iPad 最终会误报超时。
+   */
   try{
-    await withTimeout(runTransaction(db, async tx=>{
+    await runTransaction(db, async tx=>{
       const tableSnap = await tx.get(tableRef);
-      const mainSnap = await tx.get(ref);
       const remote = tableSnap.exists() ? clone(tableSnap.data()) : {};
-      const main = mainSnap.exists() ? clone(mainSnap.data()) : {};
 
       if(remote.start && !remote.deleted){
         committedTable = clone(remote);
-        const tables = Array.isArray(main.tables) ? clone(main.tables) : [];
-        tables[index] = clone(remote);
-        tx.set(ref,{
-          ...main,
-          tables,
-          _sync:{
-            revision:Number(main?._sync?.revision || 0)+1,
-            updatedAt:Date.now(),
-            deviceId:getDeviceId(),
-            action:"atomic_start_table_repair_view",
-            operationId:String(remote.lastOperationId || "")
-          }
-        },{merge:false});
         startedByThisDevice = false;
         return;
       }
 
-      operationId = `atomic_start_${record?.id || index}_${Date.now()}`;
       const version = Number(remote.version || remote?._entitySync?.version || 0) + 1;
       committedTable = {
         ...clone(remote),
@@ -1836,40 +1879,27 @@ export async function atomicStartTable({db,ref,tableIndex,tablePatch,record,time
 
       tx.set(tableRef,committedTable,{merge:false});
       tx.set(recordRef,{...clone(record),deleted:false,updatedAt:serverTimestamp(),updatedBy:getDeviceId(),lastOperationId:operationId},{merge:true});
-
-      // 桌位权威文档、进行中账单和 shop/main 兼容视图必须在同一事务提交。
-      // 否则账单会已生成，但计时页面收到旧 shop/main 后又恢复为“未开始”。
-      const tables = Array.isArray(main.tables) ? clone(main.tables) : [];
-      tables[index] = {
-        ...clone(tablePatch),
-        id:tableId,
-        tableIndex:index,
-        version,
-        deleted:false,
-        updatedAt:Date.now(),
-        updatedBy:getDeviceId(),
-        lastOperationId:operationId,
-        _entitySync:{version,updatedAt:Date.now(),deviceId:getDeviceId(),operationId}
-      };
-      tx.set(ref,{
-        ...main,
-        tables,
-        _sync:{
-          revision:Number(main?._sync?.revision || 0)+1,
-          updatedAt:Date.now(),
-          deviceId:getDeviceId(),
-          action:"atomic_start_table",
-          operationId,
-          architecture:"entity-v4"
-        }
-      },{merge:false});
-      committedTable = clone(tables[index]);
       startedByThisDevice = true;
-    }),CLOUD_SYNC_TIMEOUT_MS,"服务器锁定桌位");
+    });
   }catch(error){
-    const lockError = new Error(`服务器未确认桌位，未开始计时：${error?.message || error}`);
+    const lockError = new Error(`服务器未能确认桌位，未开始计时：${error?.message || error}`);
     lockError.code = error?.code || "table-lock-failed";
     throw lockError;
+  }
+
+  /*
+   * 事务中的 serverTimestamp 不能直接写入本机 JSON。为本机与兼容视图
+   * 换成确定的毫秒时间；权威 tables 文档仍保留服务器时间。
+   */
+  if(committedTable){
+    committedTable={
+      ...clone(committedTable),
+      updatedAt:Date.now(),
+      _entitySync:{
+        ...clone(committedTable?._entitySync||{}),
+        updatedAt:Date.now()
+      }
+    };
   }
 
   const local = clone((await loadLocalState().catch(()=>null)) || localBefore || {});
@@ -1893,13 +1923,28 @@ export async function atomicStartTable({db,ref,tableIndex,tablePatch,record,time
   broadcastState(nextState,"atomic_start_table");
 
   if(startedByThisDevice && record){
-    await mirrorRecordEntity(db,record,operationId || `atomic_start_record_${record.id}_${Date.now()}`);
     const localRecords = await loadLocalRecords().catch(()=>[]);
     const mergedRecords = mergeRecordLists(localRecords,[record]);
     writeShadow(RECORDS_SHADOW,mergedRecords);
     broadcastRecord(record,"atomic_start_record");
     await writeLocalRecords(mergedRecords);
   }
+
+  /*
+   * 旧页面仍监听 shop/main，因此立即在后台补写兼容视图。
+   * 它失败不会撤销已成功的权威开桌，也不会制造“页面报失败、服务器稍后
+   * 又成功”的不确定状态；后续本机队列和页面刷新仍会继续补齐。
+   */
+  void mirrorStartedTableIntoMainWithRetry(
+    db,
+    ref,
+    index,
+    committedTable,
+    String(committedTable?.lastOperationId||operationId)
+  ).catch(error=>{
+    console.warn("桌位已安全开始，兼容视图将在后台重试",error);
+    setSyncStatus("pending","● 桌位已安全开始 · 其他页面正在同步");
+  });
 
   return {startedByThisDevice,state:nextState,table:clone(committedTable || {})};
 }

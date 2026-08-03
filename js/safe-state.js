@@ -33,13 +33,15 @@ const RECORD_HISTORY_SYNC_META = "chiptune_records_history_sync_v2";
 const RECORD_DELETES_COLLECTION = "recordDeletes";
 const STATE_QUEUE_SHADOW = "chiptune_state_queue_shadow_v4";
 const RECORD_QUEUE_SHADOW = "chiptune_record_queue_shadow_v4";
+const STATE_QUEUE_TOMBSTONES = "chiptune_state_queue_tombstones_v1";
+const RECORD_QUEUE_TOMBSTONES = "chiptune_record_queue_tombstones_v1";
 const IDB_STATE_DEGRADED_UNTIL = "chiptune_idb_state_degraded_until_v1";
 const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.65";
+const CLIENT_SYNC_VERSION = "4.0.66";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -416,6 +418,21 @@ function queueShadowKey(store){
   return store === "recordQueue" ? RECORD_QUEUE_SHADOW : STATE_QUEUE_SHADOW;
 }
 
+function queueTombstoneKey(store){
+  return store === "recordQueue" ? RECORD_QUEUE_TOMBSTONES : STATE_QUEUE_TOMBSTONES;
+}
+
+function readQueueTombstones(store){
+  const value=readShadow(queueTombstoneKey(store));
+  return new Set(Array.isArray(value)?value.map(String):[]);
+}
+
+function writeQueueTombstones(store,set){
+  // operationId 本身全局唯一。保留最近的确认删除标记，可阻止 Safari 在
+  // IndexedDB 删除提交延迟时把旧项目重新合并回应急队列。
+  writeShadow(queueTombstoneKey(store),[...set].slice(-5000));
+}
+
 function readQueueShadow(store){
   const value = readShadow(queueShadowKey(store));
   return Array.isArray(value) ? value : [];
@@ -431,6 +448,10 @@ function writeQueueShadow(store,items){
  * 为“没有待上传修改”的最终状态。
  */
 async function queuePut(store,item){
+  const tombstones=readQueueTombstones(store);
+  if(tombstones.delete(String(item?.id))){
+    writeQueueTombstones(store,tombstones);
+  }
   const shadow = readQueueShadow(store);
   const index = shadow.findIndex(value=>String(value?.id) === String(item?.id));
   if(index >= 0) shadow[index] = clone(item); else shadow.push(clone(item));
@@ -453,13 +474,17 @@ async function queuePut(store,item){
 }
 
 async function queueAll(store){
+  const tombstones=readQueueTombstones(store);
   const merged = new Map(
-    readQueueShadow(store).map(item=>[String(item?.id),clone(item)])
+    readQueueShadow(store)
+      .filter(item=>!tombstones.has(String(item?.id)))
+      .map(item=>[String(item?.id),clone(item)])
   );
   const degraded = store === "recordQueue" ? idbRecordsDegraded : idbStateDegraded;
   if(degraded) return [...merged.values()];
   try{
     for(const item of await idbAll(store)){
+      if(tombstones.has(String(item?.id))) continue;
       merged.set(String(item?.id),clone(item));
     }
   }catch(error){
@@ -476,6 +501,9 @@ async function queueAll(store){
 }
 
 async function queueDelete(store,id){
+  const tombstones=readQueueTombstones(store);
+  tombstones.add(String(id));
+  writeQueueTombstones(store,tombstones);
   writeQueueShadow(
     store,
     readQueueShadow(store).filter(item=>String(item?.id) !== String(id))

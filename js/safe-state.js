@@ -39,7 +39,7 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.63";
+const CLIENT_SYNC_VERSION = "4.0.64";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -1998,6 +1998,41 @@ async function quarantineConflict(db,item,error,storeName){
 
 async function pendingCount(){
   return (await queueAll("queue")).length + (await queueAll("recordQueue")).length;
+}
+
+// 只读诊断入口：用于确认“角标有待办，但上传函数提前返回”究竟来自
+// 应急队列、IndexedDB，还是残留的 single-flight。不会修改或上传数据。
+export async function getPendingSyncDiagnostics(){
+  const stateShadow=readQueueShadow("queue");
+  const recordShadow=readQueueShadow("recordQueue");
+  let stateIdb=[];
+  let recordIdb=[];
+  let stateIdbError=null;
+  let recordIdbError=null;
+  try{ stateIdb=await idbAll("queue"); }catch(error){ stateIdbError=String(error?.message||error); }
+  try{ recordIdb=await idbAll("recordQueue"); }catch(error){ recordIdbError=String(error?.message||error); }
+  const stateMerged=await queueAll("queue");
+  const recordMerged=await queueAll("recordQueue");
+  return {
+    version:CLIENT_SYNC_VERSION,
+    online:navigator.onLine,
+    flushInFlight:Boolean(flushInFlight),
+    stateDegraded:idbStateDegraded,
+    recordsDegraded:idbRecordsDegraded,
+    stateShadowCount:stateShadow.length,
+    recordShadowCount:recordShadow.length,
+    stateIdbCount:stateIdb.length,
+    recordIdbCount:recordIdb.length,
+    stateMergedCount:stateMerged.length,
+    recordMergedCount:recordMerged.length,
+    stateIdbError,
+    recordIdbError,
+    records:recordMerged.map(item=>({
+      id:String(item?.id||""),
+      type:String(item?.type||""),
+      recordId:String(item?.recordId||"")
+    }))
+  };
 }
 
 export function installConnectionGuard(){

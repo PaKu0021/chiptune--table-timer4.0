@@ -37,7 +37,7 @@ const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.57";
+const CLIENT_SYNC_VERSION = "4.0.58";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 

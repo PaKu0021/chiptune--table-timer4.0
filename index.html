@@ -75,16 +75,31 @@
 
 
 <script type="module">
-import { db } from "./js/firebase.js?v=4.0.57";
-import { loadLocalState, reconcileCloudState, loadLocalRecords, mergeRecordLists, installConnectionGuard, flushPending, subscribeAllRecords } from "./js/safe-state.js?v=4.0.57";
-import { getCurrentBusinessDate, getRecordBusinessDate } from "./js/business-day.js?v=4.0.57";
+import { db } from "./js/firebase.js?v=4.0.58";
+import { loadLocalState, reconcileCloudState, loadLocalRecords, mergeRecordLists, installConnectionGuard, flushPending, subscribeAllRecords } from "./js/safe-state.js?v=4.0.58";
+import { getCurrentBusinessDate, getRecordBusinessDate } from "./js/business-day.js?v=4.0.58";
 import { doc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 const ref = doc(db,"shop","main");
 const recordsRef = collection(db,"records");
 
 let homeState = null;
 let allRecords = [];
+
+const runHomePendingSync = ()=>{
+  if(!navigator.onLine) return;
+  flushPending({db,ref}).catch(err=>console.warn("首页自动同步失败",err));
+};
+
+// 必须先注册监听再启动连接守护。iPad 本地队列读取很快时，旧顺序会
+// 错过首次 online 事件，造成账单待办只显示数量却从未真正上传。
+window.addEventListener("chiptune-online-change",e=>{
+  if(e.detail?.online) runHomePendingSync();
+});
+window.addEventListener("chiptune-sync-tick",e=>{
+  if(e.detail?.online) runHomePendingSync();
+});
 installConnectionGuard();
+setTimeout(runHomePendingSync,0);
 
 loadLocalState().then(local=>{
   if(local){
@@ -97,11 +112,6 @@ loadLocalRecords().then(localRecords=>{
   allRecords = mergeRecordLists(allRecords, localRecords);
   updateHome();
 });
-
-window.addEventListener("chiptune-online-change",e=>{
-  if(e.detail?.online) flushPending({db,ref}).catch(err=>console.warn("自动同步失败",err));
-});
-
 
 onSnapshot(ref,async snap=>{
   if(!snap.exists()) return;

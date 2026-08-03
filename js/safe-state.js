@@ -37,6 +37,7 @@ const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
+const CLIENT_SYNC_VERSION = "4.0.57";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -171,6 +172,7 @@ let saveQueue = Promise.resolve();
 let badge = null;
 let flushTimer = null;
 let lastSyncStatusType = "";
+let lastSyncFailure = null;
 function degradedUntil(key){
   try{ return Number(localStorage.getItem(key) || 0); }catch{ return 0; }
 }
@@ -465,6 +467,23 @@ function ensureBadge(){
     "box-shadow:0 2px 10px rgba(0,0,0,.18)"
   ].join(";");
   badge.textContent = "● 正在读取本机数据";
+  badge.title = `同步模块 v${CLIENT_SYNC_VERSION} · 点此查看待上传详情`;
+  badge.style.cursor = "pointer";
+  badge.addEventListener("click",async()=>{
+    const stateItems = await queueAll("queue").catch(()=>[]);
+    const recordItems = await queueAll("recordQueue").catch(()=>[]);
+    const describe = item=>{
+      if(!(item?.syncV4 || item?.syncV3)) return `旧格式/${item?.action || item?.type || "未知"}`;
+      return `${item?.entityType || item?.type || "未知"}/${item?.entityId || item?.recordId || item?.logicalId || "-"}`;
+    };
+    const lines = [...stateItems,...recordItems].slice(0,12).map(describe);
+    alert([
+      `同步模块 v${CLIENT_SYNC_VERSION}`,
+      `待上传：${stateItems.length + recordItems.length} 项`,
+      lines.length ? `项目：${lines.join("、")}` : "项目：无",
+      lastSyncFailure ? `最近失败：${lastSyncFailure}` : "最近失败：无"
+    ].join("\n"));
+  });
   document.body.appendChild(badge);
   return badge;
 }
@@ -1381,6 +1400,27 @@ async function enqueue(local,base,action){
   return enqueueEntityOperations(local,base,action);
 }
 
+/*
+ * 早期版本把整个 shop/main 快照放进 queue。升级到实体队列后，这类项目
+ * 不能由 flushOne 直接执行，会永远停在 iPad 上显示“4项等待上传”。
+ * 只要旧项目仍带有 state/base，就可无损拆成桌位、预约、编组和客户操作。
+ */
+async function upgradeLegacyStateQueue(items){
+  const upgraded=[];
+  for(const item of Array.isArray(items)?items:[]){
+    if(item?.syncV4 || item?.syncV3){ upgraded.push(item); continue; }
+    const next=item?.state || item?.nextState || item?.localState;
+    const base=item?.base || item?.cloudBaseline || item?.baseState;
+    if(next && base){
+      await enqueueEntityOperations(next,base,item?.action || "legacy_queue_upgrade");
+      await queueDelete("queue",item.id);
+      continue;
+    }
+    upgraded.push(item);
+  }
+  return upgraded.length === items.length ? items : queueAll("queue");
+}
+
 async function flushOne({db,ref}, item, options={}){
   if(item?.syncV4 || item?.syncV3) return flushEntityOperation({db,ref},item,options);
   throw new Error("检测到旧版整状态队列，请先执行迁移或清除旧待同步队列");
@@ -1688,7 +1728,8 @@ export async function flushPending({
       return Number(a?.createdAt||0)-Number(b?.createdAt||0);
     };
 
-    let items = (await queueAll("queue")).sort(
+    let items = await upgradeLegacyStateQueue(await queueAll("queue"));
+    items = items.sort(
       byPriorityThenTime(item=>actionPriority.has(String(item?.action||"")))
     );
     let recordItems = (await queueAll("recordQueue")).sort(
@@ -1739,7 +1780,8 @@ export async function flushPending({
             console.warn("操作发生并发冲突，已隔离等待人工确认",item,error);
             continue;
           }
-          if(!quiet) setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
+          lastSyncFailure=String(error?.code || error?.message || error);
+          setSyncStatus("error",`● ${items.length + recordItems.length} 项未上传 · ${lastSyncFailure}`);
           throw error;
         }
       }
@@ -1750,7 +1792,8 @@ export async function flushPending({
           }
         });
       }catch(error){
-        if(!quiet) setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
+        lastSyncFailure=String(error?.code || error?.message || error);
+        setSyncStatus("error",`● ${items.length + recordItems.length} 项未上传 · ${lastSyncFailure}`);
         throw error;
       }
 
@@ -1760,6 +1803,7 @@ export async function flushPending({
       }else if(!left && (idbStateDegraded || idbRecordsDegraded)){
         setSyncStatus("synced","● 云端已同步 · 本机使用应急缓存");
       }else if(!left){
+        lastSyncFailure=null;
         setSyncStatus("synced");
       }
     }finally{

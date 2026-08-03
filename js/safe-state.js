@@ -41,7 +41,19 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.66";
+const CLIENT_SYNC_VERSION = "4.0.67";
+const recordFlushTrace=[];
+function traceRecordFlush(stage,item=null,error=null){
+  recordFlushTrace.push({
+    at:new Date().toISOString(),
+    stage:String(stage||""),
+    id:String(item?.id||""),
+    recordId:String(item?.recordId||""),
+    online:navigator.onLine,
+    error:error ? String(error?.code||error?.message||error) : null
+  });
+  if(recordFlushTrace.length>40) recordFlushTrace.splice(0,recordFlushTrace.length-40);
+}
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -501,6 +513,7 @@ async function queueAll(store){
 }
 
 async function queueDelete(store,id){
+  if(store==="recordQueue") traceRecordFlush("queue_delete_start",{id});
   const tombstones=readQueueTombstones(store);
   tombstones.add(String(id));
   writeQueueTombstones(store,tombstones);
@@ -512,7 +525,9 @@ async function queueDelete(store,id){
   if(degraded) return;
   try{
     await idbDelete(store,id);
+    if(store==="recordQueue") traceRecordFlush("queue_delete_done",{id});
   }catch(error){
+    if(store==="recordQueue") traceRecordFlush("queue_delete_idb_error",{id},error);
     console.warn(`${store} IndexedDB队列删除失败，应急队列已完成删除`,error);
   }
 }
@@ -1664,7 +1679,9 @@ async function enqueueRecordOperations(next,previous){
   }
 }
 async function flushRecordV3({db},item){
+  traceRecordFlush("transaction_start",item);
   await runTransaction(db,async tx=>{
+    traceRecordFlush("transaction_callback",item);
     const opRef=operationRef(db,item.id);
     const opSnap=await tx.get(opRef); if(opSnap.exists()) return;
     const canonicalRef=recordRefV4(db,item.recordId);
@@ -1713,7 +1730,9 @@ async function flushRecordV3({db},item){
     }
     tx.set(opRef,{operationId:item.id,type:item.type,recordId:item.recordId,paymentId:item.paymentId||null,deviceId:item.deviceId,status:"committed",committedAt:serverTimestamp()});
   });
+  traceRecordFlush("transaction_done",item);
   await queueDelete("recordQueue",item.id);
+  traceRecordFlush("item_done",item);
 }
 
 async function flushRecordOne({db}, item){
@@ -1852,11 +1871,11 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   const workerCount = Math.min(appleTouch ? 6 : 10,queues.length);
 
   const worker = async()=>{
-    while(!fatalError && navigator.onLine){
+    while(!fatalError){
       const queueIndex = nextQueueIndex++;
       if(queueIndex >= queues.length) return;
       let pending=queues[queueIndex].slice();
-      while(pending.length && !fatalError && navigator.onLine){
+      while(pending.length && !fatalError){
         try{
           const count=await withTimeout(flushRecordGroup({db,groupItems:pending}),CLOUD_SYNC_TIMEOUT_MS,"收银记录批量同步");
           completedItems+=count;
@@ -1889,6 +1908,7 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
  * 每一项都使用原 operationId 的 Firestore 事务，因此重复执行也是幂等的。
  */
 async function flushRecordQueueReliably({db},recordItems,onProgress){
+  traceRecordFlush("reliable_start",recordItems?.[0]);
   const groups=new Map();
   for(const item of Array.isArray(recordItems)?recordItems:[]){
     const key=String(item?.recordId || item?.id || "");
@@ -1905,25 +1925,29 @@ async function flushRecordQueueReliably({db},recordItems,onProgress){
     || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const workerCount=Math.min(appleTouch ? 3 : 5,queues.length);
   const worker=async()=>{
-    while(!fatalError && navigator.onLine){
+    while(!fatalError){
       const index=nextIndex++;
       if(index>=queues.length) return;
       try{
         for(const item of queues[index]){
+          traceRecordFlush("before_flush_one",item);
           await withTimeout(
             flushRecordOne({db},item),
             CLOUD_SYNC_TIMEOUT_MS,
             `账单 ${String(item?.recordId||"")} 同步`
           );
+          traceRecordFlush("after_flush_one",item);
         }
         completedGroups+=1;
         onProgress?.(completedGroups,queues.length);
       }catch(error){
+        traceRecordFlush("flush_error",queues[index]?.[0],error);
         fatalError=error;
       }
     }
   };
   await Promise.all(Array.from({length:workerCount},()=>worker()));
+  traceRecordFlush("reliable_done",recordItems?.[0],fatalError);
   if(fatalError) throw fatalError;
 }
 
@@ -2124,6 +2148,7 @@ export async function getPendingSyncDiagnostics(){
     recordMergedCount:recordMerged.length,
     stateIdbError,
     recordIdbError,
+    recordFlushTrace:recordFlushTrace.slice(),
     records:recordMerged.map(item=>({
       id:String(item?.id||""),
       type:String(item?.type||""),

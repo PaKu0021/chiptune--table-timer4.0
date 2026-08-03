@@ -1295,7 +1295,15 @@ async function enqueueEntityOperations(local,base,action){
 }
 function hasPatchConflict(remote,base,patch){
   for(const key of Object.keys(patch||{})){
-    if(!same(remote?.[key],base?.[key])) return key;
+    /*
+     * iPad 可能在收到成功响应前退到后台，随后会重放同一修改。此时
+     * remote 已经不是旧基线，但如果它已经等于本次准备写入的值，说明
+     * 云端实际上完成了操作，不是多端冲突。旧逻辑会把这种成功重试
+     * 永久留成“4项等待上传”。
+     */
+    const remoteChanged=!same(remote?.[key],base?.[key]);
+    const desiredAlreadyPresent=same(remote?.[key],patch?.[key]);
+    if(remoteChanged && !desiredAlreadyPresent) return key;
   }
   return null;
 }

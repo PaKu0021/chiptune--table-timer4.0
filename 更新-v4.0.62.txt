@@ -1,0 +1,6 @@
+Chiptune v4.0.62
+
+- 修复 Chrome、Safari 在标签页切换或网络异常后 Web Lock 永久等待，导致队列有数量但无失败信息、上传函数从未启动的问题。
+- 所有设备统一使用页面内 single-flight 控制上传，避免一次页面内重复执行。
+- 跨标签页重复提交继续由 Firestore transaction 和 operationId 幂等保护，不会重复生成账单或付款。
+- v4.0.61 已确认的本机时间字段过滤和账单补丁合并继续保留。

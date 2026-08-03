@@ -38,7 +38,7 @@ const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.61";
+const CLIENT_SYNC_VERSION = "4.0.62";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -174,7 +174,7 @@ let badge = null;
 let flushTimer = null;
 let lastSyncStatusType = "";
 let lastSyncFailure = null;
-let appleFlushInFlight = null;
+let flushInFlight = null;
 function degradedUntil(key){
   try{ return Number(localStorage.getItem(key) || 0); }catch{ return 0; }
 }
@@ -1921,39 +1921,23 @@ export async function flushPending({
     }
   };
 
-  const appleTouch = /iPad|iPhone|iPod/.test(navigator.userAgent)
-    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-
   /*
-   * iPad Safari 在标签页进入后台再恢复后，Web Locks 偶尔会留下永远等待
-   * 的锁请求：队列有数量、没有失败、也从未开始上传。Firestore 操作本身
-   * 已由 operationId + transaction 保证幂等，因此 Apple 触屏设备改用
-   * 当前页面内的 single-flight；同页不会并发，多页偶发重放也不会重复记账。
+   * Safari 和 Chrome 都可能在标签页切换、休眠或异常网络后留下永远等待
+   * 的 Web Lock：队列有数量、没有失败、上传函数却从未真正开始。
+   * Firestore 操作本身已有 operationId + transaction 幂等保护，因此所有
+   * 设备统一使用当前页面内的 single-flight。不同标签页偶发重放同一操作
+   * 也只会由 Firestore 提交一次，不会产生重复账单或重复付款。
    */
-  if(appleTouch){
-    if(appleFlushInFlight) return appleFlushInFlight;
-    appleFlushInFlight = Promise.resolve()
-      .then(run)
-      .catch(error=>{
-        lastSyncFailure=String(error?.code || error?.message || error);
-        setSyncStatus("error",`● 待办未上传 · ${lastSyncFailure}`);
-        throw error;
-      })
-      .finally(()=>{ appleFlushInFlight=null; });
-    return appleFlushInFlight;
-  }
-  if(navigator.locks?.request){
-    return navigator.locks.request("chiptune-cloud-flush-v4",run).catch(error=>{
+  if(flushInFlight) return flushInFlight;
+  flushInFlight = Promise.resolve()
+    .then(run)
+    .catch(error=>{
       lastSyncFailure=String(error?.code || error?.message || error);
       setSyncStatus("error",`● 待办未上传 · ${lastSyncFailure}`);
       throw error;
-    });
-  }
-  return run().catch(error=>{
-    lastSyncFailure=String(error?.code || error?.message || error);
-    setSyncStatus("error",`● 待办未上传 · ${lastSyncFailure}`);
-    throw error;
-  });
+    })
+    .finally(()=>{ flushInFlight=null; });
+  return flushInFlight;
 }
 
 async function quarantineConflict(db,item,error,storeName){

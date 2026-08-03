@@ -38,7 +38,7 @@ const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.60";
+const CLIENT_SYNC_VERSION = "4.0.61";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -1449,6 +1449,23 @@ function cloudAlreadyHasPayment(record,item){
   });
 }
 
+// 这些字段只描述本机缓存或由服务器维护，不属于营业账单内容。
+// 尤其 localUpdatedAt 会在每次应急保存时变化，不能拿它判断云端是否
+// 已经包含同一笔账单，否则内容完全相同的账单也会永久留在待上传队列。
+const RECORD_NON_BUSINESS_FIELDS = new Set([
+  "localUpdatedAt",
+  "updatedAt",
+  "updatedBy",
+  "lastOperationId",
+  "version"
+]);
+
+function recordBusinessPatch(patch){
+  return Object.fromEntries(
+    Object.entries(patch || {}).filter(([key])=>!RECORD_NON_BUSINESS_FIELDS.has(key))
+  );
+}
+
 /*
  * 原子开桌已经把完整账单和付款写入 records 文档，随后本地安全保存仍会
  * 生成 record_patch + payment_upsert 作为应急确认。若页面在成功响应前
@@ -1465,7 +1482,8 @@ async function acknowledgeRecordQueueFromCloud(records){
     if(!remote) continue;
     let confirmed=false;
     if(item?.type==="record_patch"){
-      confirmed=Object.keys(item.patch||{}).every(key=>same(remote?.[key],item.patch?.[key]));
+      const businessPatch=recordBusinessPatch(item.patch);
+      confirmed=Object.keys(businessPatch).every(key=>same(remote?.[key],businessPatch[key]));
     }else if(item?.type==="payment_upsert"){
       confirmed=cloudAlreadyHasPayment(remote,item);
     }else if(item?.type==="record_delete"){
@@ -1503,7 +1521,9 @@ async function confirmPendingRecordQueueFromServer(db){
   }
   return acknowledgeRecordQueueFromCloud(records);
 }
-async function enqueueRecordOperations(next,previous){
+const recordEnqueueChains = new Map();
+
+async function enqueueRecordOperationsUnlocked(next,previous){
   const recordId=String(next.id);
   const now=Date.now();
   const deviceId=getDeviceId();
@@ -1511,8 +1531,10 @@ async function enqueueRecordOperations(next,previous){
   const queuedRecordOperations=await queueAll("recordQueue");
   const prev=normalizeRecordPayments(previous||{id:recordId,payments:[]});
   const normalized=normalizeRecordPayments(next);
-  const {payments:_nextPayments,...nextMeta}=normalized;
-  const {payments:_prevPayments,...prevMeta}=prev;
+  const {payments:_nextPayments,...nextMetaRaw}=normalized;
+  const {payments:_prevPayments,...prevMetaRaw}=prev;
+  const nextMeta=recordBusinessPatch(nextMetaRaw);
+  const prevMeta=recordBusinessPatch(prevMetaRaw);
   const recordPatch=shallowPatch(nextMeta,prevMeta);
   if(Object.keys(recordPatch).length){
     const pending=queuedRecordOperations
@@ -1521,7 +1543,8 @@ async function enqueueRecordOperations(next,previous){
     const first=pending[0] || null;
     const recordOpId=crypto.randomUUID?crypto.randomUUID():`record_${recordId}_${now}`;
     const rawBase=clone(first?.baseRecord || prev);
-    const {payments:_basePayments,...baseRecord}=rawBase;
+    const {payments:_basePayments,...baseRecordRaw}=rawBase;
+    const baseRecord=recordBusinessPatch(baseRecordRaw);
     for(const item of pending) await queueDelete("recordQueue",item.id);
     await queuePut("recordQueue",{
       id:recordOpId,
@@ -1556,6 +1579,22 @@ async function enqueueRecordOperations(next,previous){
     await queuePut("recordQueue",{id:opId,syncV4:true,type:"payment_void",recordId,paymentId:id,basePayment:clone(old),createdAt:Date.now(),deviceId});
   }
   return normalized;
+}
+
+async function enqueueRecordOperations(next,previous){
+  const recordId=String(next?.id || "");
+  const previousChain=recordEnqueueChains.get(recordId) || Promise.resolve();
+  const currentChain=previousChain
+    .catch(()=>{})
+    .then(()=>enqueueRecordOperationsUnlocked(next,previous));
+  recordEnqueueChains.set(recordId,currentChain);
+  try{
+    return await currentChain;
+  }finally{
+    if(recordEnqueueChains.get(recordId)===currentChain){
+      recordEnqueueChains.delete(recordId);
+    }
+  }
 }
 async function flushRecordV3({db},item){
   await runTransaction(db,async tx=>{

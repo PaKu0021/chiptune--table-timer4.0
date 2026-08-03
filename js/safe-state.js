@@ -1660,12 +1660,42 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   if(fatalError) throw fatalError;
 }
 
-export async function flushPending({db,ref,quiet=false}){
+export async function flushPending({
+  db,
+  ref,
+  quiet=false,
+  priorityRecordIds=[],
+  priorityActions=[],
+  priorityOnly=false
+}){
   if(!navigator.onLine) return;
 
   const run = async()=>{
-    const items = (await queueAll("queue")).sort((a,b)=>a.createdAt-b.createdAt);
-    const recordItems = (await queueAll("recordQueue")).sort((a,b)=>a.createdAt-b.createdAt);
+    const recordPriority = new Set((priorityRecordIds || []).map(String));
+    const actionPriority = new Set((priorityActions || []).map(String));
+    const byPriorityThenTime = isPriority=>(a,b)=>{
+      const ap = isPriority(a) ? 0 : 1;
+      const bp = isPriority(b) ? 0 : 1;
+      if(ap !== bp) return ap-bp;
+      return Number(a?.createdAt||0)-Number(b?.createdAt||0);
+    };
+
+    let items = (await queueAll("queue")).sort(
+      byPriorityThenTime(item=>actionPriority.has(String(item?.action||"")))
+    );
+    let recordItems = (await queueAll("recordQueue")).sort(
+      byPriorityThenTime(item=>recordPriority.has(String(item?.recordId||"")))
+    );
+
+    /*
+     * 开桌后的关键资料不能被数百条历史账单挡在后面。
+     * priorityOnly 只刷新本次桌位/预约/编组与当前账单；旧积压仍留在
+     * 可靠队列中，由连接守护任务在后台继续批量上传。
+     */
+    if(priorityOnly){
+      items = items.filter(item=>actionPriority.has(String(item?.action||"")));
+      recordItems = recordItems.filter(item=>recordPriority.has(String(item?.recordId||"")));
+    }
     const recordBatchCount=new Set(recordItems.map(item=>String(item?.recordId||item?.id||""))).size;
     const totalDetails = items.length + recordItems.length;
     const totalBatches = items.length + recordBatchCount;
@@ -2109,7 +2139,7 @@ export function getLocalRecordSync(recordId){
   return clone(list.find(r=>String(r.id)===String(recordId)) || null);
 }
 
-export function emergencySaveRecord({db,ref,record,quietSync=false}){
+export function emergencySaveRecord({db,ref,record,quietSync=false,prioritySync=false}){
   const next = clone(record);
   next.localUpdatedAt = Date.now();
   const current = readShadow(RECORDS_SHADOW);
@@ -2126,11 +2156,23 @@ export function emergencySaveRecord({db,ref,record,quietSync=false}){
       await writeLocalRecords(merged);
       await enqueueRecordOperations(next,previous);
       if(navigator.onLine){
-        clearTimeout(flushTimer);
-        flushTimer = setTimeout(()=>flushPending({db,ref,quiet:quietSync}).catch(err=>{
+        const runPriorityFlush = ()=>flushPending({
+          db,
+          ref,
+          quiet:quietSync,
+          priorityRecordIds:prioritySync ? [String(next.id)] : [],
+          priorityOnly:Boolean(prioritySync)
+        }).catch(err=>{
           console.warn("紧急账单云端同步失败，将自动重试",err);
           if(!quietSync) setSyncStatus("error",`● 账单同步失败：${err?.code || err?.message || err}`);
-        }),0);
+        });
+        if(prioritySync){
+          // 当前桌的优先任务使用独立定时器，不能被随后产生的状态任务取消。
+          setTimeout(runPriorityFlush,0);
+        }else{
+          clearTimeout(flushTimer);
+          flushTimer = setTimeout(runPriorityFlush,0);
+        }
       }
     }catch(err){
       console.warn("紧急账单 IndexedDB 保存失败，已保留 localStorage 备份",err);
@@ -2140,7 +2182,14 @@ export function emergencySaveRecord({db,ref,record,quietSync=false}){
   return next;
 }
 
-export function emergencySaveState({db,ref,state,action="emergency_state_update",quietSync=false}){
+export function emergencySaveState({
+  db,
+  ref,
+  state,
+  action="emergency_state_update",
+  quietSync=false,
+  prioritySync=false
+}){
   const local = clone(state);
   const base = clone(baseline || local);
   // Synchronous shadow first, so closing the modal/page cannot lose this state.
@@ -2155,11 +2204,22 @@ export function emergencySaveState({db,ref,state,action="emergency_state_update"
       const count = await pendingCount();
       if(!quietSync) setSyncStatus(navigator.onLine ? "pending" : "offline", navigator.onLine ? `● 已保存本机 · ${count} 项等待上传` : `● 已保存本机 · 离线 · ${count} 项待上传`);
       if(navigator.onLine){
-        clearTimeout(flushTimer);
-        flushTimer = setTimeout(()=>flushPending({db,ref,quiet:quietSync}).catch(err=>{
+        const runPriorityFlush = ()=>flushPending({
+          db,
+          ref,
+          quiet:quietSync,
+          priorityActions:prioritySync ? [action] : [],
+          priorityOnly:Boolean(prioritySync)
+        }).catch(err=>{
           console.warn("紧急状态云端同步失败，将自动重试",err);
           if(!quietSync) setSyncStatus("error",`● 云端同步失败：${err?.code || err?.message || err}`);
-        }),0);
+        });
+        if(prioritySync){
+          setTimeout(runPriorityFlush,0);
+        }else{
+          clearTimeout(flushTimer);
+          flushTimer = setTimeout(runPriorityFlush,0);
+        }
       }
     }catch(err){
       console.warn("紧急状态 IndexedDB 保存失败，已保留 localStorage 备份",err);

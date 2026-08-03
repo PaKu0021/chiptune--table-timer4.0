@@ -37,7 +37,7 @@ const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.58";
+const CLIENT_SYNC_VERSION = "4.0.59";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -173,6 +173,7 @@ let badge = null;
 let flushTimer = null;
 let lastSyncStatusType = "";
 let lastSyncFailure = null;
+let appleFlushInFlight = null;
 function degradedUntil(key){
   try{ return Number(localStorage.getItem(key) || 0); }catch{ return 0; }
 }
@@ -1814,10 +1815,39 @@ export async function flushPending({
     }
   };
 
-  if(navigator.locks?.request){
-    return navigator.locks.request("chiptune-cloud-flush-v4",run);
+  const appleTouch = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+  /*
+   * iPad Safari 在标签页进入后台再恢复后，Web Locks 偶尔会留下永远等待
+   * 的锁请求：队列有数量、没有失败、也从未开始上传。Firestore 操作本身
+   * 已由 operationId + transaction 保证幂等，因此 Apple 触屏设备改用
+   * 当前页面内的 single-flight；同页不会并发，多页偶发重放也不会重复记账。
+   */
+  if(appleTouch){
+    if(appleFlushInFlight) return appleFlushInFlight;
+    appleFlushInFlight = Promise.resolve()
+      .then(run)
+      .catch(error=>{
+        lastSyncFailure=String(error?.code || error?.message || error);
+        setSyncStatus("error",`● 待办未上传 · ${lastSyncFailure}`);
+        throw error;
+      })
+      .finally(()=>{ appleFlushInFlight=null; });
+    return appleFlushInFlight;
   }
-  return run();
+  if(navigator.locks?.request){
+    return navigator.locks.request("chiptune-cloud-flush-v4",run).catch(error=>{
+      lastSyncFailure=String(error?.code || error?.message || error);
+      setSyncStatus("error",`● 待办未上传 · ${lastSyncFailure}`);
+      throw error;
+    });
+  }
+  return run().catch(error=>{
+    lastSyncFailure=String(error?.code || error?.message || error);
+    setSyncStatus("error",`● 待办未上传 · ${lastSyncFailure}`);
+    throw error;
+  });
 }
 
 async function quarantineConflict(db,item,error,storeName){

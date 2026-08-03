@@ -39,7 +39,7 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.64";
+const CLIENT_SYNC_VERSION = "4.0.65";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -1854,6 +1854,51 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   if(fatalError) throw fatalError;
 }
 
+/*
+ * 批量事务只用于减少往返，不能成为待办上传的唯一通道。Safari/iPad 在
+ * 页面休眠恢复后，曾出现批量函数正常返回、队列却原样保留且没有异常的
+ * 情况。这里提供独立的可靠补偿通道：同一账单仍按顺序，不同账单并发；
+ * 每一项都使用原 operationId 的 Firestore 事务，因此重复执行也是幂等的。
+ */
+async function flushRecordQueueReliably({db},recordItems,onProgress){
+  const groups=new Map();
+  for(const item of Array.isArray(recordItems)?recordItems:[]){
+    const key=String(item?.recordId || item?.id || "");
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(item);
+  }
+  const queues=[...groups.values()].map(items=>items.slice().sort(
+    (a,b)=>Number(a?.createdAt||0)-Number(b?.createdAt||0)
+  ));
+  let nextIndex=0;
+  let completedGroups=0;
+  let fatalError=null;
+  const appleTouch=/iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const workerCount=Math.min(appleTouch ? 3 : 5,queues.length);
+  const worker=async()=>{
+    while(!fatalError && navigator.onLine){
+      const index=nextIndex++;
+      if(index>=queues.length) return;
+      try{
+        for(const item of queues[index]){
+          await withTimeout(
+            flushRecordOne({db},item),
+            CLOUD_SYNC_TIMEOUT_MS,
+            `账单 ${String(item?.recordId||"")} 同步`
+          );
+        }
+        completedGroups+=1;
+        onProgress?.(completedGroups,queues.length);
+      }catch(error){
+        fatalError=error;
+      }
+    }
+  };
+  await Promise.all(Array.from({length:workerCount},()=>worker()));
+  if(fatalError) throw fatalError;
+}
+
 export async function flushPending({
   db,
   ref,
@@ -1878,6 +1923,13 @@ export async function flushPending({
     items = items.sort(
       byPriorityThenTime(item=>actionPriority.has(String(item?.action||"")))
     );
+    // 原子开桌可能已经把结果写到云端，只是 Safari 来不及删除本地确认项。
+    // 先按账单 ID 直接读取服务器并确认，可在不重复写入的情况下清掉这类残留。
+    try{
+      await confirmPendingRecordQueueFromServer(db);
+    }catch(error){
+      console.warn("上传前核对云端账单失败，将继续使用幂等事务补传",error);
+    }
     let recordItems = (await queueAll("recordQueue")).sort(
       byPriorityThenTime(item=>recordPriority.has(String(item?.recordId||"")))
     );
@@ -1937,6 +1989,23 @@ export async function flushPending({
             if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completedGroups}/${items.length + totalGroups} 个合并批次`);
           }
         });
+
+        // 批量路径不应在无异常的情况下留下同一批记录。若仍有残留，立即
+        // 使用逐项幂等事务补偿，不再让角标永久停在“等待上传”。
+        const attemptedIds=new Set(recordItems.map(item=>String(item?.id||"")));
+        const leftovers=(await queueAll("recordQueue")).filter(
+          item=>attemptedIds.has(String(item?.id||""))
+        );
+        if(leftovers.length){
+          console.warn("批量账单同步未清空队列，启动可靠补偿",leftovers);
+          await flushRecordQueueReliably({
+            db,
+            recordItems:leftovers,
+            onProgress:(completedGroups,totalGroups)=>{
+              if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 正在补传 ${completedGroups}/${totalGroups} 笔账单`);
+            }
+          });
+        }
       }catch(error){
         lastSyncFailure=String(error?.code || error?.message || error);
         setSyncStatus("error",`● ${items.length + recordItems.length} 项未上传 · ${lastSyncFailure}`);

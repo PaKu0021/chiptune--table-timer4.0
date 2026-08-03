@@ -1499,6 +1499,114 @@ async function flushRecordOne({db}, item){
   throw new Error("检测到旧版账单队列，请先执行迁移或清除旧待同步队列");
 }
 
+/*
+ * 同一账单的资料修改、付款和作废原本每项都需要一次 Firestore
+ * 事务。现在先读取全部必要文档，再在一个事务中按原顺序合并。
+ * 这只减少网络往返，每个 operationId 仍会记录，不会丢掉付款。
+ */
+async function flushRecordGroup({db},groupItems){
+  const items=(Array.isArray(groupItems)?groupItems:[]).slice().sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0));
+  if(!items.length) return 0;
+  if(items.some(item=>!(item?.syncV4||item?.syncV3))){
+    throw new Error("检测到旧版账单队列，请先执行迁移或清除旧待同步队列");
+  }
+
+  const recordId=String(items[0].recordId||"");
+  const canonicalRef=recordRefV4(db,recordId);
+  let committedIds=[];
+
+  await runTransaction(db,async tx=>{
+    // Firestore 要求事务内的所有读取都在第一次写入之前完成。
+    const canonicalSnap=await tx.get(canonicalRef);
+    const operationSnaps=new Map();
+    for(const item of items){
+      operationSnaps.set(String(item.id),await tx.get(operationRef(db,item.id)));
+    }
+    const paymentSnaps=new Map();
+    for(const item of items){
+      if(!["payment_upsert","payment_void"].includes(item.type)) continue;
+      const paymentId=String(item.paymentId||"");
+      if(!paymentSnaps.has(paymentId)){
+        paymentSnaps.set(paymentId,await tx.get(paymentRefV4(db,recordId,paymentId)));
+      }
+    }
+
+    const active=items.filter(item=>!operationSnaps.get(String(item.id))?.exists());
+    committedIds=items.map(item=>String(item.id));
+    if(!active.length) return;
+
+    const remote=canonicalSnap.exists()?clone(canonicalSnap.data()):{};
+    let nextRecord=clone(remote);
+    let version=Number(remote.version||0);
+    const paymentWrites=new Map();
+    let deleteMarker=null;
+
+    for(const item of active){
+      if(item.type==="record_delete"){
+        version+=1;
+        nextRecord={...nextRecord,deleted:true,deletedAt:serverTimestamp(),deletedBy:item.deviceId,version,updatedAt:serverTimestamp(),lastOperationId:item.id};
+        deleteMarker=item;
+      }else if(item.type==="record_patch"){
+        const expected=Number(item.expectedVersion||0);
+        const conflict=Number(remote.version||0)!==expected
+          ? hasPatchConflict(remote,item.baseRecord,item.patch)
+          : null;
+        if(conflict){
+          const error=new Error(`账单已在其他设备修改：${conflict}`);
+          error.code="sync-conflict";
+          error.conflictField=conflict;
+          error.conflictItem=item;
+          throw error;
+        }
+        version+=1;
+        nextRecord={...applyPatchObject(nextRecord,item.patch),deleted:false,version,updatedAt:serverTimestamp(),updatedBy:item.deviceId,lastOperationId:item.id};
+      }else{
+        const paymentId=String(item.paymentId||"");
+        const snap=paymentSnaps.get(paymentId);
+        const remotePayment=snap?.exists()?clone(snap.data()):{};
+        const paymentWrite=item.type==="payment_void"
+          ? {...remotePayment,status:"void",voidedAt:serverTimestamp(),voidedBy:item.deviceId,lastOperationId:item.id}
+          : {...remotePayment,...clone(item.payment),status:item.payment?.status||"active",updatedAt:serverTimestamp(),updatedBy:item.deviceId,lastOperationId:item.id};
+        paymentWrites.set(paymentId,paymentWrite);
+        const payments=Array.isArray(nextRecord.payments)?clone(nextRecord.payments):[];
+        const index=payments.findIndex((payment,i)=>paymentStableId(payment,i,recordId)===paymentId);
+        const viewPayment={...clone(paymentWrite),updatedAt:Date.now()};
+        if(index>=0) payments[index]=viewPayment; else payments.push(viewPayment);
+        version+=1;
+        nextRecord={...nextRecord,payments,version,updatedAt:serverTimestamp(),updatedBy:item.deviceId,lastOperationId:item.id};
+      }
+    }
+
+    for(const [paymentId,payment] of paymentWrites){
+      tx.set(paymentRefV4(db,recordId,paymentId),payment,{merge:false});
+    }
+    tx.set(canonicalRef,nextRecord,{merge:false});
+    if(deleteMarker){
+      tx.set(doc(db,RECORD_DELETES_COLLECTION,recordId),{
+        recordId,
+        deleted:true,
+        deletedAt:serverTimestamp(),
+        deletedBy:deleteMarker.deviceId,
+        operationId:deleteMarker.id
+      },{merge:true});
+    }
+    for(const item of active){
+      tx.set(operationRef(db,item.id),{
+        operationId:item.id,
+        type:item.type,
+        recordId,
+        paymentId:item.paymentId||null,
+        deviceId:item.deviceId,
+        status:"committed",
+        committedAt:serverTimestamp()
+      });
+    }
+  });
+
+  for(const id of committedIds) await queueDelete("recordQueue",id);
+  return committedIds.length;
+}
+
 async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   // 同一账单的修改必须保持原顺序；不同账单互不覆盖，可以安全并发。
   const groups = new Map();
@@ -1509,7 +1617,8 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   }
   const queues = [...groups.values()];
   let nextQueueIndex = 0;
-  let completed = 0;
+  let completedItems = 0;
+  let completedGroups = 0;
   let fatalError = null;
   /*
    * 不同账单使用不同 Firestore 文档，不存在互相覆盖，允许更高并发。
@@ -1524,21 +1633,25 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
     while(!fatalError && navigator.onLine){
       const queueIndex = nextQueueIndex++;
       if(queueIndex >= queues.length) return;
-      for(const item of queues[queueIndex]){
-        if(fatalError || !navigator.onLine) return;
+      let pending=queues[queueIndex].slice();
+      while(pending.length && !fatalError && navigator.onLine){
         try{
-          await withTimeout(flushRecordOne({db},item),CLOUD_SYNC_TIMEOUT_MS,"收银记录同步");
+          const count=await withTimeout(flushRecordGroup({db,groupItems:pending}),CLOUD_SYNC_TIMEOUT_MS,"收银记录批量同步");
+          completedItems+=count;
+          completedGroups+=1;
+          onProgress?.(completedGroups,queues.length,completedItems);
+          pending=[];
         }catch(error){
-          if(error?.code==="sync-conflict"){
+          if(error?.code==="sync-conflict" && error?.conflictItem){
+            const item=error.conflictItem;
             await quarantineConflict(db,item,error,"recordQueue");
             console.warn("账单操作发生并发冲突，已隔离等待人工确认",item,error);
+            pending=pending.filter(candidate=>String(candidate.id)!==String(item.id));
+            completedItems+=1;
           }else{
-            fatalError = error;
-            return;
+            fatalError=error;
           }
         }
-        completed += 1;
-        onProgress?.(completed);
       }
     }
   };
@@ -1553,8 +1666,10 @@ export async function flushPending({db,ref,quiet=false}){
   const run = async()=>{
     const items = (await queueAll("queue")).sort((a,b)=>a.createdAt-b.createdAt);
     const recordItems = (await queueAll("recordQueue")).sort((a,b)=>a.createdAt-b.createdAt);
-    const total = items.length + recordItems.length;
-    if(!total){
+    const recordBatchCount=new Set(recordItems.map(item=>String(item?.recordId||item?.id||""))).size;
+    const totalDetails = items.length + recordItems.length;
+    const totalBatches = items.length + recordBatchCount;
+    if(!totalDetails){
       if(idbStateDegraded || idbRecordsDegraded){
         setSyncStatus("synced","● 云端已同步 · 本机使用应急缓存");
       }else{
@@ -1563,8 +1678,8 @@ export async function flushPending({db,ref,quiet=false}){
       return;
     }
 
-    if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 正在上传 ${total} 项`);
-    broadcastSyncBatch("start",total);
+    if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 正在上传 ${totalBatches} 个合并批次`);
+    broadcastSyncBatch("start",totalBatches);
 
     let latestMaterializedState = null;
     try{
@@ -1591,9 +1706,9 @@ export async function flushPending({db,ref,quiet=false}){
         }
       }
       try{
-        await flushRecordQueueConcurrently({db},recordItems,completed=>{
-          if(completed === recordItems.length || completed % 10 === 0){
-            if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completed}/${total} 项`);
+        await flushRecordQueueConcurrently({db},recordItems,(completedGroups,totalGroups)=>{
+          if(completedGroups === totalGroups || completedGroups % 5 === 0){
+            if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completedGroups}/${items.length + totalGroups} 个合并批次`);
           }
         });
       }catch(error){
@@ -1613,7 +1728,7 @@ export async function flushPending({db,ref,quiet=false}){
       if(latestMaterializedState){
         broadcastState(latestMaterializedState,"sync_batch_complete");
       }
-      broadcastSyncBatch("end",total);
+      broadcastSyncBatch("end",totalBatches);
     }
   };
 

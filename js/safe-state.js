@@ -35,13 +35,14 @@ const STATE_QUEUE_SHADOW = "chiptune_state_queue_shadow_v4";
 const RECORD_QUEUE_SHADOW = "chiptune_record_queue_shadow_v4";
 const STATE_QUEUE_TOMBSTONES = "chiptune_state_queue_tombstones_v1";
 const RECORD_QUEUE_TOMBSTONES = "chiptune_record_queue_tombstones_v1";
+const CONFLICT_SHADOW = "chiptune_sync_conflicts_shadow_v1";
 const IDB_STATE_DEGRADED_UNTIL = "chiptune_idb_state_degraded_until_v1";
 const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.69";
+const CLIENT_SYNC_VERSION = "4.0.70";
 const recordFlushTrace=[];
 function traceRecordFlush(stage,item=null,error=null){
   recordFlushTrace.push({
@@ -2111,9 +2112,55 @@ async function quarantineConflict(db,item,error,storeName){
     operation:stripImagesDeep(clone(item||{})),
     deviceId:getDeviceId(),
     status:"needs_review",
-    createdAt:serverTimestamp()
+    createdAt:Date.now()
   };
-  await setDoc(doc(db,CONFLICT_COLLECTION,String(item.id)),payload,{merge:true});
+
+  // 冲突记录必须先保存在本机。部分旧 Firestore 规则不允许客户端写入
+  // syncConflicts；若把“写冲突日志”和“删除待办”绑在一起，待办便会永远
+  // 重试并持续显示 sync-conflict。日志写入失败不能阻止队列解除阻塞。
+  const localConflicts=readShadow(CONFLICT_SHADOW);
+  const conflictList=Array.isArray(localConflicts)?localConflicts:[];
+  const conflictIndex=conflictList.findIndex(value=>String(value?.operationId)===String(payload.operationId));
+  if(conflictIndex>=0) conflictList[conflictIndex]=payload;
+  else conflictList.push(payload);
+  writeShadow(CONFLICT_SHADOW,conflictList.slice(-100));
+
+  try{
+    await withTimeout(
+      setDoc(doc(db,CONFLICT_COLLECTION,String(item.id)),{
+        ...payload,
+        createdAt:serverTimestamp()
+      },{merge:true}),
+      CLOUD_SYNC_TIMEOUT_MS,
+      "保存云端冲突日志"
+    );
+  }catch(logError){
+    console.warn("云端冲突日志保存失败，已保留本机副本",logError);
+  }
+
+  // 账单字段冲突时云端版本是已经提交成功的营业事实。待办被隔离后，必须
+  // 同时用云端账单替换本机乐观副本，否则各设备即使没有待办，营业额仍会
+  // 因本机较新的 localUpdatedAt 而长期不一致。
+  if(storeName==="recordQueue" && item?.recordId && navigator.onLine){
+    try{
+      const snap=await withTimeout(
+        getDocFromServer(recordRefV4(db,String(item.recordId))),
+        CLOUD_SYNC_TIMEOUT_MS,
+        `读取冲突账单 ${item.recordId}`
+      );
+      if(snap.exists()){
+        const remote={id:snap.id,...snap.data()};
+        const local=await loadLocalRecords().catch(()=>[]);
+        const next=local.filter(record=>String(record?.id)!==String(item.recordId));
+        next.push(remote);
+        await writeLocalRecords(next);
+        broadcastRecord(remote,"record_conflict_cloud_wins");
+      }
+    }catch(rebaseError){
+      console.warn("冲突账单本机副本刷新失败；下次云端订阅将继续恢复",rebaseError);
+    }
+  }
+
   await queueDelete(storeName,String(item.id));
 }
 

@@ -10,6 +10,7 @@ import {
   getDocsFromServer,
   onSnapshot,
   getDoc,
+  getDocFromServer,
   query,
   where,
   orderBy,
@@ -37,7 +38,7 @@ const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.59";
+const CLIENT_SYNC_VERSION = "4.0.60";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -1436,6 +1437,72 @@ function normalizeRecordPayments(record){
   next.payments=(Array.isArray(next.payments)?next.payments:[]).map((p,i)=>({...clone(p),id:paymentStableId(p,i,next.id),paymentId:paymentStableId(p,i,next.id)}));
   return next;
 }
+
+function cloudAlreadyHasPayment(record,item){
+  const payments=Array.isArray(record?.payments)?record.payments:[];
+  const wanted=item?.payment || {};
+  return payments.some((payment,index)=>{
+    const remoteId=paymentStableId(payment,index,item.recordId);
+    if(item?.paymentId && remoteId===String(item.paymentId)) return true;
+    if(wanted?.operationId && String(payment?.operationId||"")===String(wanted.operationId)) return true;
+    return false;
+  });
+}
+
+/*
+ * 原子开桌已经把完整账单和付款写入 records 文档，随后本地安全保存仍会
+ * 生成 record_patch + payment_upsert 作为应急确认。若页面在成功响应前
+ * 进入后台，这些确认可能残留。收到云端账单时按账单ID、补丁目标值和
+ * 付款操作ID确认；云端已包含相同结果即可安全删除重复待办。
+ */
+async function acknowledgeRecordQueueFromCloud(records){
+  const cloudMap=new Map((Array.isArray(records)?records:[]).map(record=>[String(record?.id||""),record]));
+  if(!cloudMap.size) return 0;
+  const items=await queueAll("recordQueue");
+  let removed=0;
+  for(const item of items){
+    const remote=cloudMap.get(String(item?.recordId||""));
+    if(!remote) continue;
+    let confirmed=false;
+    if(item?.type==="record_patch"){
+      confirmed=Object.keys(item.patch||{}).every(key=>same(remote?.[key],item.patch?.[key]));
+    }else if(item?.type==="payment_upsert"){
+      confirmed=cloudAlreadyHasPayment(remote,item);
+    }else if(item?.type==="record_delete"){
+      confirmed=Boolean(remote?.deleted);
+    }
+    if(!confirmed) continue;
+    await queueDelete("recordQueue",item.id);
+    removed+=1;
+  }
+  if(removed){
+    const left=await pendingCount();
+    if(left) setSyncStatus("pending",`● 已确认云端结果 · ${left} 项等待上传`);
+    else{
+      lastSyncFailure=null;
+      setSyncStatus(idbStateDegraded || idbRecordsDegraded ? "synced" : "synced",
+        idbStateDegraded || idbRecordsDegraded ? "● 云端已同步 · 本机使用应急缓存" : undefined);
+    }
+  }
+  return removed;
+}
+
+async function confirmPendingRecordQueueFromServer(db){
+  const pending=await queueAll("recordQueue");
+  const recordIds=[...new Set(pending.map(item=>String(item?.recordId||"")).filter(Boolean))];
+  if(!recordIds.length || !navigator.onLine) return 0;
+  const records=[];
+  // 待办通常只有当前几桌；逐笔按ID读取，避免“最近记录”查询窗口漏掉它们。
+  for(const recordId of recordIds){
+    const snap=await withTimeout(
+      getDocFromServer(recordRefV4(db,recordId)),
+      CLOUD_SYNC_TIMEOUT_MS,
+      `确认云端账单 ${recordId}`
+    );
+    if(snap.exists()) records.push({id:snap.id,...snap.data()});
+  }
+  return acknowledgeRecordQueueFromCloud(records);
+}
 async function enqueueRecordOperations(next,previous){
   const recordId=String(next.id);
   const now=Date.now();
@@ -2702,6 +2769,12 @@ export function subscribeAllRecords({
   let deleteUnsubscribe = null;
   let sharedDeletedIds = new Set();
 
+  // 不等待增量查询窗口命中：直接核对本机待办指向的云端账单。
+  confirmPendingRecordQueueFromServer(db).catch(error=>{
+    lastSyncFailure=String(error?.code || error?.message || error);
+    console.warn("云端账单待办确认失败",error);
+  });
+
   // 同一台设备的计时器写入账单后，首页/今日账单/老板模式立即接收，
   // 不等待 Firestore 再回传一次。
   const recordBroadcastHandler = event=>{
@@ -2801,6 +2874,7 @@ export function subscribeAllRecords({
           .map(d=>({id:d.id,...d.data()}))
           .filter(r=>r.id!=="init" && !r.deleted);
 
+        await acknowledgeRecordQueueFromCloud(list);
         mergeCloud(list);
         const merged = await emit({persist:!snap.metadata.fromCache});
 
@@ -2925,6 +2999,7 @@ export function subscribeAllRecords({
           .map(d=>({id:d.id,...d.data()}))
           .filter(r=>r.id!=="init" && !r.deleted);
 
+        await acknowledgeRecordQueueFromCloud(list);
         fullServerRecords = mergeRecordLists(fullServerRecords,list);
         mergeCloud(list);
         const merged = await emit({persist:true});

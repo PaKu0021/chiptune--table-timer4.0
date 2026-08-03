@@ -1547,7 +1547,7 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
   if(fatalError) throw fatalError;
 }
 
-export async function flushPending({db,ref}){
+export async function flushPending({db,ref,quiet=false}){
   if(!navigator.onLine) return;
 
   const run = async()=>{
@@ -1563,7 +1563,7 @@ export async function flushPending({db,ref}){
       return;
     }
 
-    setSyncStatus("syncing",`● 本机已保存 · 正在上传 ${total} 项`);
+    if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 正在上传 ${total} 项`);
     broadcastSyncBatch("start",total);
 
     let latestMaterializedState = null;
@@ -1586,27 +1586,27 @@ export async function flushPending({db,ref}){
             console.warn("操作发生并发冲突，已隔离等待人工确认",item,error);
             continue;
           }
-          setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
+          if(!quiet) setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
           throw error;
         }
       }
       try{
         await flushRecordQueueConcurrently({db},recordItems,completed=>{
           if(completed === recordItems.length || completed % 10 === 0){
-            setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completed}/${total} 项`);
+            if(!quiet) setSyncStatus("syncing",`● 本机已保存 · 已上传 ${items.length + completed}/${total} 项`);
           }
         });
       }catch(error){
-        setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
+        if(!quiet) setSyncStatus("error",`● 云端同步失败：${error?.code || error?.message || error}`);
         throw error;
       }
 
       const left = (await queueAll("queue")).length + (await queueAll("recordQueue")).length;
-      if(left){
+      if(left && !quiet){
         setSyncStatus("pending",`● 已保存本机 · ${left} 项等待上传`);
-      }else if(idbStateDegraded || idbRecordsDegraded){
+      }else if(!left && (idbStateDegraded || idbRecordsDegraded)){
         setSyncStatus("synced","● 云端已同步 · 本机使用应急缓存");
-      }else{
+      }else if(!left){
         setSyncStatus("synced");
       }
     }finally{
@@ -1994,7 +1994,7 @@ export function getLocalRecordSync(recordId){
   return clone(list.find(r=>String(r.id)===String(recordId)) || null);
 }
 
-export function emergencySaveRecord({db,ref,record}){
+export function emergencySaveRecord({db,ref,record,quietSync=false}){
   const next = clone(record);
   next.localUpdatedAt = Date.now();
   const current = readShadow(RECORDS_SHADOW);
@@ -2012,9 +2012,9 @@ export function emergencySaveRecord({db,ref,record}){
       await enqueueRecordOperations(next,previous);
       if(navigator.onLine){
         clearTimeout(flushTimer);
-        flushTimer = setTimeout(()=>flushPending({db,ref}).catch(err=>{
+        flushTimer = setTimeout(()=>flushPending({db,ref,quiet:quietSync}).catch(err=>{
           console.warn("紧急账单云端同步失败，将自动重试",err);
-          setSyncStatus("error",`● 账单同步失败：${err?.code || err?.message || err}`);
+          if(!quietSync) setSyncStatus("error",`● 账单同步失败：${err?.code || err?.message || err}`);
         }),0);
       }
     }catch(err){
@@ -2025,25 +2025,25 @@ export function emergencySaveRecord({db,ref,record}){
   return next;
 }
 
-export function emergencySaveState({db,ref,state,action="emergency_state_update"}){
+export function emergencySaveState({db,ref,state,action="emergency_state_update",quietSync=false}){
   const local = clone(state);
   const base = clone(baseline || local);
   // Synchronous shadow first, so closing the modal/page cannot lose this state.
   writeShadow(STATE_SHADOW,{state:local,cloudBaseline:base,savedAt:Date.now(),deviceId:getDeviceId()});
   broadcastState(local,action);
-  setSyncStatus(navigator.onLine ? "pending" : "offline", navigator.onLine ? "● 已紧急保存本机 · 等待上传" : "● 已紧急保存本机 · 当前离线");
+  if(!quietSync) setSyncStatus(navigator.onLine ? "pending" : "offline", navigator.onLine ? "● 已紧急保存本机 · 等待上传" : "● 已紧急保存本机 · 当前离线");
 
   Promise.resolve().then(async()=>{
     try{
       await writeLocalState(local,base);
       await enqueue(local,base,action);
       const count = await pendingCount();
-      setSyncStatus(navigator.onLine ? "pending" : "offline", navigator.onLine ? `● 已保存本机 · ${count} 项等待上传` : `● 已保存本机 · 离线 · ${count} 项待上传`);
+      if(!quietSync) setSyncStatus(navigator.onLine ? "pending" : "offline", navigator.onLine ? `● 已保存本机 · ${count} 项等待上传` : `● 已保存本机 · 离线 · ${count} 项待上传`);
       if(navigator.onLine){
         clearTimeout(flushTimer);
-        flushTimer = setTimeout(()=>flushPending({db,ref}).catch(err=>{
+        flushTimer = setTimeout(()=>flushPending({db,ref,quiet:quietSync}).catch(err=>{
           console.warn("紧急状态云端同步失败，将自动重试",err);
-          setSyncStatus("error",`● 云端同步失败：${err?.code || err?.message || err}`);
+          if(!quietSync) setSyncStatus("error",`● 云端同步失败：${err?.code || err?.message || err}`);
         }),0);
       }
     }catch(err){

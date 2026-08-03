@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.52";
+import { db } from "./firebase.js?v=4.0.53";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.52";
-/*import { formatTime } from "./common.js?v=4.0.52";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.52";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.52";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.52";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.53";
+/*import { formatTime } from "./common.js?v=4.0.53";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.53";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.53";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.53";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -34,10 +34,10 @@ loadLocalState()
     );
   });
 window.addEventListener("chiptune-online-change",e=>{
-  if(e.detail?.online) flushPending({db,ref}).catch(err=>console.warn("自动同步失败",err));
+  if(e.detail?.online) flushPending({db,ref,quiet:true}).catch(err=>console.warn("自动同步失败",err));
 });
 window.addEventListener("chiptune-sync-tick",()=>{
-  flushPending({db,ref}).catch(err=>console.warn("定时同步失败",err));
+  flushPending({db,ref,quiet:true}).catch(err=>console.warn("定时同步失败",err));
 });
 window.addEventListener("chiptune-sync-batch",event=>{
   if(event.detail?.phase === "start"){
@@ -1239,7 +1239,7 @@ if(visit){
 }
 
 // 同步写入本机影子，今日账单会立即出现；IndexedDB 与 Firestore 后台同步。
-emergencySaveRecord({db, ref, record});
+emergencySaveRecord({db, ref, record, quietSync:Boolean(options.quietSync)});
   return record;
 }
 
@@ -2133,9 +2133,10 @@ async function start(i){
       db,
       ref,
       state,
-      action:"start_table_post_transaction"
+      action:"start_table_post_transaction",
+      quietSync:true
     });
-    createOrUpdateRecord(state.tables[i]).catch(syncError=>{
+    createOrUpdateRecord(state.tables[i],{quietSync:true}).catch(syncError=>{
       console.warn("开始后的账单附加信息将在后台继续同步",syncError);
     });
     setSyncStatus(

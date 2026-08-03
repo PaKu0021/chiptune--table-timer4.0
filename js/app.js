@@ -1,11 +1,11 @@
 ﻿/*alert("app.js 已加载");*/
-import { db } from "./firebase.js?v=4.0.68";
+import { db } from "./firebase.js?v=4.0.69";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable } from "./safe-state.js?v=4.0.68";
-/*import { formatTime } from "./common.js?v=4.0.68";*/
-import { resetTable, formatTime } from "./common.js?v=4.0.68";
-import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.68";
-import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.68";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable, atomicAdjustTableExtra, atomicSetTablePackage } from "./safe-state.js?v=4.0.69";
+/*import { formatTime } from "./common.js?v=4.0.69";*/
+import { resetTable, formatTime } from "./common.js?v=4.0.69";
+import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.69";
+import { getBusinessDateKey, jpyToRmb, currencyForPaymentMethod, repairRecordPaymentAmounts } from "./business-day.js?v=4.0.69";
 const ref = doc(db, "shop", "main");
 
 const VAPID_KEY = "BN7TodJ52H-wKg54Dj-tFcm21Q5zplpmeFuXYzqtQbkb1LzpTO-pRsGV1fWpUEiDKxBbqN8l2SRtzXuiisRHEPE";
@@ -1344,7 +1344,9 @@ filteredTables.forEach(({t,i})=>{
     }
     const p = getPackage(t);
     const elapsed = getElapsedMs(t);
-    const remain = getLimitMs(t) - elapsed;
+    const limitMs = getLimitMs(t);
+    const remain = limitMs - elapsed;
+    const isEffectivelyUnlimited = limitMs === Infinity;
     const status = getStatus(t);
     const overtime = status === "overtime";
 
@@ -1374,7 +1376,7 @@ filteredTables.forEach(({t,i})=>{
       ? "未开始"
       : t.pausedAt
         ? "暂停中 " + formatTime(elapsed)
-        : p.unlimited
+        : isEffectivelyUnlimited
           ? "已使用 " + formatTime(elapsed)
           : overtime
             ? "超时 " + formatTime(Math.abs(remain))
@@ -1588,6 +1590,7 @@ async function setPackage(i,v){
   const t = state.tables[i];
   const nextIndex = Number(v);
   if(nextIndex === Number(t.packageIndex || 0)) return;
+  const before = structuredClone(t);
   protectLocalTable(i);
 
   // 直接重选套餐视为纠正原套餐：计时连续，先付款金额同步改为新套餐基础价。
@@ -1605,14 +1608,48 @@ async function setPackage(i,v){
   }
 
   render();
-  emergencySaveState({db,ref,state,action:"correct_running_package"});
 
-  if(t.start){
-    const record = await createOrUpdateRecord(t);
-    if(t.payTiming === "prepaid"){
+  if(navigator.onLine){
+    try{
+      const tablePatch={
+        packageIndex:t.packageIndex,
+        customPackage:structuredClone(t.customPackage || null),
+        ...(t.start && t.payTiming === "prepaid" ? {
+          startedPackageName:t.startedPackageName,
+          startedPackagePrice:t.startedPackagePrice,
+          paidJPY:t.paidJPY,
+          paidRMB:t.paidRMB,
+          paidAt:t.paidAt
+        } : {})
+      };
+      const result=await atomicSetTablePackage({
+        db,ref,tableIndex:i,tablePatch,
+        action:"correct_running_package",
+        expectedRecordId:String(before.recordId || ""),
+        getState:()=>state
+      });
+      if(result?.table) state.tables[i]=structuredClone(result.table);
+      render();
+    }catch(error){
+      console.error("套餐纠正同步失败",error);
+      state.tables[i]=before;
+      render();
+      setSyncStatus("error",`● 套餐修改失败：${error?.code || error?.message || error}`);
+      alert(`套餐没有修改成功，请刷新后重试。\n${error?.message || error}`);
+      return;
+    }
+  }else{
+    // 离线时仍保留本机操作；恢复网络后由普通实体队列合并上传。
+    emergencySaveState({db,ref,state,action:"correct_running_package"});
+  }
+
+  const finalTable=state.tables[i];
+  if(finalTable.start){
+    const record = await createOrUpdateRecord(finalTable);
+    if(finalTable.payTiming === "prepaid"){
       consolidatePayment(record,{
         amountJPY:Number(correctedPackage.price || 0),
-        pay:t.pay || record.pay || "未记录",
+        pay:finalTable.pay || record.pay || "未记录",
         reason:"套餐预付款",
         note:"运行中重选套餐，按新套餐纠正"
       });
@@ -1621,7 +1658,7 @@ async function setPackage(i,v){
         ? "不限时"
         : correctedPackage.minutes;
       record.packagePrice = Number(correctedPackage.price || 0);
-      record.originalJPY = getOriginalJPY(t);
+      record.originalJPY = getOriginalJPY(finalTable);
       record.paidJPY = sumPaymentsJPY(record.payments);
       record.totalJPY = record.paidJPY;
       record.totalRMB = sumPaymentsRMB(record.payments);
@@ -2214,29 +2251,56 @@ async function addHour(i){
   stopAlertLoop(i);
   protectLocalTable(i,20000);
   const table = state.tables[i];
-  const beforeJPY = getOriginalJPY(table);
+  const before = structuredClone(table);
   table.extra = Number(table.extra || 0) + 60 * 60 * 1000;
   table.alerted = false;
   table.alerting = false;
   table.lastAction = "extend_one_hour";
   table.updatedAt = Date.now();
-  const afterJPY = getOriginalJPY(table);
-  const deltaJPY = Math.max(0,afterJPY - beforeJPY);
-  const actionKey = `extend_${Date.now()}_${Number(table.extra || 0)}`;
 
   render();
-  const saveTask = save("extend_one_hour");
-  if(table.start){
-    createOrUpdateRecord(table,{
-      adjustmentJPY:table.payTiming === "prepaid" ? deltaJPY : 0,
+  let finalTable=table;
+  let serverBefore=before;
+  if(navigator.onLine){
+    try{
+      const result=await atomicAdjustTableExtra({
+        db,ref,tableIndex:i,deltaMs:60*60*1000,
+        action:"extend_one_hour",
+        expectedRecordId:String(before.recordId || ""),
+        getState:()=>state
+      });
+      if(result?.table){
+        finalTable=structuredClone(result.table);
+        serverBefore=structuredClone(result.previousTable || before);
+        state.tables[i]=finalTable;
+      }
+      render();
+    }catch(error){
+      console.error("续时事务失败",error);
+      state.tables[i]=before;
+      render();
+      setSyncStatus("error",`● 续时失败：${error?.code || error?.message || error}`);
+      alert(`续时没有成功，请刷新后重试。\n${error?.message || error}`);
+      return;
+    }
+  }else{
+    save("extend_one_hour").catch(err=>{
+      console.error("续时保存失败",err);
+      setSyncStatus("pending","● 续时已保存在应急副本 · 等待重新同步");
+    });
+  }
+
+  const beforeJPY=getOriginalJPY(serverBefore);
+  const afterJPY=getOriginalJPY(finalTable);
+  const deltaJPY=Math.max(0,afterJPY-beforeJPY);
+  const actionKey=`extend_${finalTable.lastOperationId || Date.now()}_${Number(finalTable.extra||0)}`;
+  if(finalTable.start){
+    createOrUpdateRecord(finalTable,{
+      adjustmentJPY:finalTable.payTiming === "prepaid" ? deltaJPY : 0,
       actionKey,
       note:"续时1小时，开始时已收款"
     }).catch(err=>console.warn("续时账单将在后台重试",err));
   }
-  saveTask.catch(err=>{
-    console.error("续时保存失败",err);
-    setSyncStatus("pending","● 续时已保存在应急副本 · 等待重新同步");
-  });
 }
 
 async function undoHour(i){
@@ -2244,29 +2308,56 @@ async function undoHour(i){
   protectLocalTable(i,20000);
   const table = state.tables[i];
   if(Number(table.extra || 0) < 60 * 60 * 1000) return;
-  const beforeJPY = getOriginalJPY(table);
+  const before = structuredClone(table);
   table.extra = Math.max(0,Number(table.extra || 0) - 60 * 60 * 1000);
   table.alerted = false;
   table.alerting = false;
   table.lastAction = "undo_one_hour";
   table.updatedAt = Date.now();
-  const afterJPY = getOriginalJPY(table);
-  const refundJPY = Math.min(0,afterJPY - beforeJPY);
-  const actionKey = `undo_${Date.now()}_${Number(table.extra || 0)}`;
 
   render();
-  const saveTask = save("undo_one_hour");
-  if(table.start){
-    createOrUpdateRecord(table,{
-      adjustmentJPY:table.payTiming === "prepaid" ? refundJPY : 0,
+  let finalTable=table;
+  let serverBefore=before;
+  if(navigator.onLine){
+    try{
+      const result=await atomicAdjustTableExtra({
+        db,ref,tableIndex:i,deltaMs:-60*60*1000,
+        action:"undo_one_hour",
+        expectedRecordId:String(before.recordId || ""),
+        getState:()=>state
+      });
+      if(result?.table){
+        finalTable=structuredClone(result.table);
+        serverBefore=structuredClone(result.previousTable || before);
+        state.tables[i]=finalTable;
+      }
+      render();
+    }catch(error){
+      console.error("撤回续时事务失败",error);
+      state.tables[i]=before;
+      render();
+      setSyncStatus("error",`● 撤回续时失败：${error?.code || error?.message || error}`);
+      alert(`撤回续时没有成功，请刷新后重试。\n${error?.message || error}`);
+      return;
+    }
+  }else{
+    save("undo_one_hour").catch(err=>{
+      console.error("撤回续时保存失败",err);
+      setSyncStatus("pending","● 撤回续时已保存在应急副本 · 等待重新同步");
+    });
+  }
+
+  const beforeJPY=getOriginalJPY(serverBefore);
+  const afterJPY=getOriginalJPY(finalTable);
+  const refundJPY=Math.min(0,afterJPY-beforeJPY);
+  const actionKey=`undo_${finalTable.lastOperationId || Date.now()}_${Number(finalTable.extra||0)}`;
+  if(finalTable.start){
+    createOrUpdateRecord(finalTable,{
+      adjustmentJPY:finalTable.payTiming === "prepaid" ? refundJPY : 0,
       actionKey,
       note:"撤回续时1小时，记录退款差额"
     }).catch(err=>console.warn("撤回续时账单将在后台重试",err));
   }
-  saveTask.catch(err=>{
-    console.error("撤回续时保存失败",err);
-    setSyncStatus("pending","● 撤回续时已保存在应急副本 · 等待重新同步");
-  });
 }
 
 
@@ -3193,14 +3284,9 @@ function renderAlarmPanel(){
 
   const overtimeTables = state.tables.filter(t=>{
     if(!t.start || t.pausedAt) return false;
-
-    const p = getPackage(t);
-    if(p.unlimited) return false;
-
-    const elapsed = Date.now() - t.start;
-    const limit = Number(p.minutes || 0) * 60 * 1000 + Number(t.extra || 0);
-
-    return elapsed > limit;
+    const limit = getLimitMs(t);
+    if(limit === Infinity) return false;
+    return getElapsedMs(t) > limit;
   });
 
   if(!overtimeTables.length){
@@ -3221,13 +3307,14 @@ function refreshVisibleTimerText(){
   state.tables.forEach((table,index)=>{
     const packageInfo = getPackage(table);
     const elapsed = getElapsedMs(table);
-    const remain = getLimitMs(table) - elapsed;
+    const limitMs = getLimitMs(table);
+    const remain = limitMs - elapsed;
     const status = getStatus(table);
     const summary = !table.start
       ? "未开始"
       : table.pausedAt
         ? "暂停中 " + formatTime(elapsed)
-        : packageInfo.unlimited
+        : limitMs === Infinity
           ? "已使用 " + formatTime(elapsed)
           : status === "overtime"
             ? "超时 " + formatTime(Math.abs(remain))

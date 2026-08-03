@@ -41,7 +41,7 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.68";
+const CLIENT_SYNC_VERSION = "4.0.69";
 const recordFlushTrace=[];
 function traceRecordFlush(stage,item=null,error=null){
   recordFlushTrace.push({
@@ -2943,20 +2943,172 @@ export async function atomicAdjustStartTime({db,ref,tableIndex,tablePatch,record
   return result;
 }
 
-export async function atomicAdjustTableExtra({db,ref,tableIndex,deltaMs,action,getState}){
-  const currentState = clone(getState ? getState() : (await loadLocalState()));
-  if(!currentState?.tables?.[tableIndex]) throw new Error("找不到该桌位");
-  const table = clone(currentState.tables[tableIndex]);
-  const current = Number(table.extra || 0);
-  if(deltaMs < 0 && current < Math.abs(deltaMs)) throw new Error("没有可以撤回的续时");
-  table.extra = Math.max(0,current + Number(deltaMs || 0));
-  table.alerted = false;
-  table.alerting = false;
-  table.lastAction = action || (deltaMs > 0 ? "extend" : "undo_extend");
-  table.updatedAt = Date.now();
-  currentState.tables[tableIndex] = table;
-  await saveStateSafely({db,ref,getState:()=>currentState,action:action || "adjust_extra"});
-  return table;
+async function removeSupersededTableFields(tableIndex,fields){
+  const fieldSet=new Set((fields||[]).map(String));
+  const items=await queueAll("queue");
+  for(const item of items){
+    if(item?.entityType!=="table" || Number(item?.tableIndex)!==Number(tableIndex)) continue;
+    const patch=clone(item.patch||{});
+    let changed=false;
+    for(const field of fieldSet){
+      if(Object.prototype.hasOwnProperty.call(patch,field)){
+        delete patch[field];
+        changed=true;
+      }
+    }
+    if(!changed) continue;
+    if(!Object.keys(patch).length){
+      await queueDelete("queue",String(item.id));
+    }else{
+      await queuePut("queue",{...item,patch});
+    }
+  }
+}
+
+/*
+ * 加时和运行中纠正套餐属于“最后一次明确操作必须生效”的桌位命令。
+ * 普通实体队列用乐观锁保护一般编辑；这些命令则直接在权威 tables 文档
+ * 上执行 Firestore 事务，并在同一事务里更新 shop/main 兼容视图。
+ * 因此其他设备即使同时修改别的桌，也不会再把本次操作打成 sync-conflict。
+ */
+async function atomicMutateTable({
+  db,
+  ref,
+  tableIndex,
+  action,
+  expectedRecordId="",
+  patch=null,
+  deltaExtraMs=0,
+  getState
+}){
+  if(!navigator.onLine) throw new Error("当前离线，无法安全更新桌位");
+  const index=Number(tableIndex);
+  const localState=clone(getState ? getState() : (await loadLocalState()));
+  const localTable=clone(localState?.tables?.[index]||{});
+  if(!localState?.tables?.[index]) throw new Error("找不到该桌位");
+
+  const tableId=entityDocId("table",index,index);
+  const tableRef=entityRef(db,"table",tableId);
+  const operationId=`${action||"table_command"}_${index}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  const now=Date.now();
+  let committedState=null;
+  let committedTable=null;
+  let previousTable=null;
+
+  await withTimeout(runTransaction(db,async tx=>{
+    // Firestore 要求所有读取先于写入。
+    const mainSnap=await tx.get(ref);
+    const tableSnap=await tx.get(tableRef);
+    const main=mainSnap.exists()?clone(mainSnap.data()):{};
+    const mainTables=Array.isArray(main.tables)?clone(main.tables):[];
+    const remote=tableSnap.exists()
+      ? clone(tableSnap.data())
+      : clone(mainTables[index]||localTable);
+
+    const expected=String(expectedRecordId||"");
+    const remoteRecordId=String(remote?.recordId||"");
+    if(expected && remoteRecordId && expected!==remoteRecordId){
+      const error=new Error("该桌已经开始新的账单，请刷新后重试");
+      error.code="table-session-changed";
+      throw error;
+    }
+
+    previousTable=clone(remote);
+    const next={...remote,...clone(patch||{})};
+    if(Number(deltaExtraMs||0)!==0){
+      const currentExtra=Number(remote?.extra||0);
+      if(deltaExtraMs<0 && currentExtra<Math.abs(deltaExtraMs)){
+        throw new Error("没有可以撤回的续时");
+      }
+      next.extra=Math.max(0,currentExtra+Number(deltaExtraMs||0));
+    }
+    next.alerted=false;
+    next.alerting=false;
+    next.lastAction=action||"table_command";
+    next.updatedAt=now;
+
+    const version=Number(remote?.version||remote?._entitySync?.version||0)+1;
+    committedTable={
+      ...next,
+      id:tableId,
+      tableIndex:index,
+      version,
+      deleted:false,
+      updatedAt:now,
+      updatedBy:getDeviceId(),
+      lastOperationId:operationId,
+      _entitySync:{version,updatedAt:now,deviceId:getDeviceId(),operationId}
+    };
+    const entityWrite={
+      ...committedTable,
+      updatedAt:serverTimestamp(),
+      _entitySync:{version,deviceId:getDeviceId(),operationId}
+    };
+    tx.set(tableRef,entityWrite,{merge:false});
+
+    mainTables[index]=clone(committedTable);
+    committedState={
+      ...main,
+      tables:mainTables,
+      _sync:{
+        revision:Number(main?._sync?.revision||0)+1,
+        updatedAt:now,
+        deviceId:getDeviceId(),
+        operationId,
+        action:action||"table_command",
+        architecture:"entity-v4"
+      }
+    };
+    tx.set(ref,committedState,{merge:false});
+    tx.set(operationRef(db,operationId),{
+      operationId,
+      entityType:"table",
+      entityId:tableId,
+      tableIndex:index,
+      action:action||"table_command",
+      deviceId:getDeviceId(),
+      status:"committed",
+      committedAt:serverTimestamp()
+    });
+  }),CLOUD_SYNC_TIMEOUT_MS,"桌位更新服务器事务");
+
+  // 旧队列中相同字段的普通 PATCH 已被这次命令取代，不能稍后重放。
+  const supersededFields=[
+    ...Object.keys(patch||{}),
+    ...(Number(deltaExtraMs||0)!==0?["extra"]:[]),
+    "alerted","alerting","lastAction","updatedAt"
+  ];
+  await removeSupersededTableFields(index,supersededFields);
+
+  baseline=clone(committedState);
+  await writeLocalState(committedState,committedState);
+  writeShadow(STATE_SHADOW,{
+    state:clone(committedState),
+    cloudBaseline:clone(committedState),
+    savedAt:Date.now(),
+    deviceId:getDeviceId()
+  });
+  window.dispatchEvent(new CustomEvent("chiptune-cloud-state-saved",{detail:{state:clone(committedState)}}));
+  broadcastState(committedState,action||"table_command");
+  setSyncStatus(
+    "synced",
+    idbStateDegraded ? "● 云端已同步 · 本机使用应急缓存" : "● 桌位修改已同步"
+  );
+  return {state:clone(committedState),table:clone(committedTable),previousTable:clone(previousTable)};
+}
+
+export async function atomicAdjustTableExtra({db,ref,tableIndex,deltaMs,action,getState,expectedRecordId=""}){
+  return atomicMutateTable({
+    db,ref,tableIndex,deltaExtraMs:Number(deltaMs||0),action,
+    expectedRecordId,getState
+  });
+}
+
+export async function atomicSetTablePackage({db,ref,tableIndex,tablePatch,action="correct_running_package",getState,expectedRecordId=""}){
+  return atomicMutateTable({
+    db,ref,tableIndex,patch:clone(tablePatch||{}),action,
+    expectedRecordId,getState
+  });
 }
 
 

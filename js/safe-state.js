@@ -41,7 +41,7 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.67";
+const CLIENT_SYNC_VERSION = "4.0.68";
 const recordFlushTrace=[];
 function traceRecordFlush(stage,item=null,error=null){
   recordFlushTrace.push({
@@ -1907,7 +1907,7 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
  * 情况。这里提供独立的可靠补偿通道：同一账单仍按顺序，不同账单并发；
  * 每一项都使用原 operationId 的 Firestore 事务，因此重复执行也是幂等的。
  */
-async function flushRecordQueueReliably({db},recordItems,onProgress){
+async function flushRecordQueueReliably({db,recordItems,onProgress}){
   traceRecordFlush("reliable_start",recordItems?.[0]);
   const groups=new Map();
   for(const item of Array.isArray(recordItems)?recordItems:[]){

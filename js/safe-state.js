@@ -36,9 +36,10 @@ const RECORD_QUEUE_SHADOW = "chiptune_record_queue_shadow_v4";
 const IDB_STATE_DEGRADED_UNTIL = "chiptune_idb_state_degraded_until_v1";
 const IDB_RECORDS_DEGRADED_UNTIL = "chiptune_idb_records_degraded_until_v1";
 const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
+const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.62";
+const CLIENT_SYNC_VERSION = "4.0.63";
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -175,6 +176,7 @@ let flushTimer = null;
 let lastSyncStatusType = "";
 let lastSyncFailure = null;
 let flushInFlight = null;
+let localDbPromise = null;
 function degradedUntil(key){
   try{ return Number(localStorage.getItem(key) || 0); }catch{ return 0; }
 }
@@ -292,8 +294,22 @@ function role(){
 }
 
 function openLocalDb(){
-  return new Promise((resolve,reject)=>{
+  if(localDbPromise) return localDbPromise;
+
+  const opening = new Promise((resolve,reject)=>{
+    let finished = false;
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const finish = (callback,value)=>{
+      if(finished) return false;
+      finished = true;
+      clearTimeout(timeoutId);
+      callback(value);
+      return true;
+    };
+    const timeoutId = setTimeout(()=>{
+      if(!finish(reject,new Error("打开本地数据库超时"))) return;
+      if(localDbPromise === opening) localDbPromise = null;
+    },LOCAL_DB_OPEN_TIMEOUT_MS);
     req.onupgradeneeded = event=>{
       const db = req.result;
       if(!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
@@ -305,9 +321,32 @@ function openLocalDb(){
         try{ event.target.transaction.objectStore("recordQueue").clear(); }catch(_){}
       }
     };
-    req.onsuccess = ()=>resolve(req.result);
-    req.onerror = ()=>reject(req.error);
+    req.onblocked = ()=>console.warn("本地数据库被旧页面占用，稍后改用应急队列");
+    req.onsuccess = ()=>{
+      const db = req.result;
+      if(!finish(resolve,db)){
+        // 打开请求在超时后才返回时必须关闭，避免留下新的阻塞连接。
+        try{ db.close(); }catch(_){}
+        return;
+      }
+      db.onversionchange = ()=>{
+        try{ db.close(); }catch(_){}
+        if(localDbPromise === opening) localDbPromise = null;
+      };
+      db.onclose = ()=>{
+        if(localDbPromise === opening) localDbPromise = null;
+      };
+    };
+    req.onerror = ()=>{
+      finish(reject,req.error || new Error("打开本地数据库失败"));
+      if(localDbPromise === opening) localDbPromise = null;
+    };
   });
+  localDbPromise = opening;
+  opening.catch(()=>{
+    if(localDbPromise === opening) localDbPromise = null;
+  });
+  return opening;
 }
 
 async function idbGet(store,key){

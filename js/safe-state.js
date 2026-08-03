@@ -42,7 +42,7 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.70";
+const CLIENT_SYNC_VERSION = "4.0.71";
 const recordFlushTrace=[];
 function traceRecordFlush(stage,item=null,error=null){
   recordFlushTrace.push({
@@ -1741,6 +1741,13 @@ async function flushRecordOne({db}, item){
   throw new Error("检测到旧版账单队列，请先执行迁移或清除旧待同步队列");
 }
 
+function isRecordSyncConflict(error){
+  const message=String(error?.message||error||"");
+  return error?.code==="sync-conflict"
+    || message.includes("sync-conflict")
+    || message.includes("账单已在其他设备修改");
+}
+
 /*
  * 同一账单的资料修改、付款和作废原本每项都需要一次 Firestore
  * 事务。现在先读取全部必要文档，再在一个事务中按原顺序合并。
@@ -1884,8 +1891,13 @@ async function flushRecordQueueConcurrently({db},recordItems,onProgress){
           onProgress?.(completedGroups,queues.length,completedItems);
           pending=[];
         }catch(error){
-          if(error?.code==="sync-conflict" && error?.conflictItem){
-            const item=error.conflictItem;
+          if(isRecordSyncConflict(error)){
+            // Safari/Firestore 在事务失败时有时会重新包装 Error，导致自定义的
+            // conflictItem 属性丢失。当前 pending 本来就是同一账单的顺序队列，
+            // 因此可安全地用第一个 record_patch 找回应隔离的冲突操作。
+            const item=error?.conflictItem
+              || pending.find(candidate=>candidate?.type==="record_patch")
+              || pending[0];
             await quarantineConflict(db,item,error,"recordQueue");
             console.warn("账单操作发生并发冲突，已隔离等待人工确认",item,error);
             pending=pending.filter(candidate=>String(candidate.id)!==String(item.id));
@@ -1943,7 +1955,17 @@ async function flushRecordQueueReliably({db,recordItems,onProgress}){
         onProgress?.(completedGroups,queues.length);
       }catch(error){
         traceRecordFlush("flush_error",queues[index]?.[0],error);
-        fatalError=error;
+        if(isRecordSyncConflict(error)){
+          const item=error?.conflictItem
+            || queues[index].find(candidate=>candidate?.type==="record_patch")
+            || queues[index][0];
+          await quarantineConflict(db,item,error,"recordQueue");
+          console.warn("可靠补偿路径检测到账单冲突，已采用云端版本",item,error);
+          completedGroups+=1;
+          onProgress?.(completedGroups,queues.length);
+        }else{
+          fatalError=error;
+        }
       }
     }
   };
@@ -2131,7 +2153,7 @@ async function quarantineConflict(db,item,error,storeName){
         ...payload,
         createdAt:serverTimestamp()
       },{merge:true}),
-      CLOUD_SYNC_TIMEOUT_MS,
+      Math.min(CLOUD_SYNC_TIMEOUT_MS,5000),
       "保存云端冲突日志"
     );
   }catch(logError){

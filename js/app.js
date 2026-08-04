@@ -1,7 +1,7 @@
 ﻿/*alert("app.js 已加载");*/
 import { db } from "./firebase.js?v=4.0.71";
 import { doc, onSnapshot, getDoc, getDocFromServer } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable, atomicAdjustTableExtra, atomicSetTablePackage } from "./safe-state.js?v=4.0.71";
+import { setStateBaseline, saveStateSafely, installConnectionGuard, setSyncStatus, loadLocalState, reconcileCloudState, flushPending, getLocalRecord, getLocalRecordSync, saveRecordSafely, emergencySaveRecord, emergencySaveState, atomicStartTable, atomicBatchStartTables, atomicAdjustStartTime, atomicReleaseTable, atomicAdjustTableExtra, atomicSetTablePackage } from "./safe-state.js?v=4.0.72";
 /*import { formatTime } from "./common.js?v=4.0.71";*/
 import { resetTable, formatTime } from "./common.js?v=4.0.71";
 import { allocateGroupId, ensureGroups, getGroup, upsertGroup, syncGroupReferences } from "./group-model.js?v=4.0.71";

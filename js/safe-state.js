@@ -29,7 +29,9 @@ const RECORDS_SHADOW = "chiptune_records_shadow_v2";
 const DELETED_RECORDS_SHADOW = "chiptune_deleted_record_ids_v1";
 const RECORD_MIGRATION_KEY = "records_migration_v3";
 const RECORD_MIGRATION_SHADOW = "chiptune_records_migration_v3";
-const RECORD_HISTORY_SYNC_META = "chiptune_records_history_sync_v2";
+// v3 forces one clean history scan after the v4.0.72 payment-conflict repair.
+// Older caches can otherwise keep showing the pre-repair copy of yesterday's bill.
+const RECORD_HISTORY_SYNC_META = "chiptune_records_history_sync_v3";
 const RECORD_DELETES_COLLECTION = "recordDeletes";
 const STATE_QUEUE_SHADOW = "chiptune_state_queue_shadow_v4";
 const RECORD_QUEUE_SHADOW = "chiptune_record_queue_shadow_v4";
@@ -42,7 +44,7 @@ const IDB_RETRY_AFTER_MS = 30 * 60 * 1000;
 const LOCAL_DB_OPEN_TIMEOUT_MS = 2500;
 const LOCAL_DB_TIMEOUT_MS = 15000;
 const CLOUD_SYNC_TIMEOUT_MS = 30000;
-const CLIENT_SYNC_VERSION = "4.0.71";
+const CLIENT_SYNC_VERSION = "4.0.72";
 const recordFlushTrace=[];
 function traceRecordFlush(stage,item=null,error=null){
   recordFlushTrace.push({
@@ -711,6 +713,20 @@ export async function getLocalRecord(recordId){
   return clone(list.find(r=>String(r.id)===String(recordId)) || null);
 }
 
+function recordMergeVersion(record){
+  return Number(record?.version || record?._recordSync?.version || 0);
+}
+
+function recordMergeTime(record){
+  const value=record?.localUpdatedAt ?? record?.updatedAt ?? record?.timestamp ?? 0;
+  if(typeof value?.toMillis==="function") return Number(value.toMillis() || 0);
+  if(value && typeof value==="object" && Number.isFinite(Number(value.seconds))){
+    return Number(value.seconds) * 1000 + Math.floor(Number(value.nanoseconds || 0) / 1e6);
+  }
+  const number=Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
 export function mergeRecordLists(cloudRecords=[], localRecords=[]){
   const deleted = getDeletedRecordIds();
   const map = new Map();
@@ -721,7 +737,13 @@ export function mergeRecordLists(cloudRecords=[], localRecords=[]){
     const key = String(r.id);
     if(r?.deleted || deleted.has(key)) continue;
     const cloud = map.get(key);
-    if(!cloud || Number(r.localUpdatedAt || r.updatedAt || r.timestamp || 0) >= Number(cloud.localUpdatedAt || cloud.updatedAt || cloud.timestamp || 0)) map.set(key,clone(r));
+    const cloudVersion=recordMergeVersion(cloud);
+    const localVersion=recordMergeVersion(r);
+    if(
+      !cloud ||
+      localVersion > cloudVersion ||
+      (localVersion === cloudVersion && recordMergeTime(r) >= recordMergeTime(cloud))
+    ) map.set(key,clone(r));
   }
   return [...map.values()].filter(r=>r.id !== "init");
 }
@@ -1521,6 +1543,31 @@ function normalizeRecordPayments(record){
   return next;
 }
 
+function mergePendingPaymentsIntoRecord(remoteRecord,pendingItems){
+  const next=normalizeRecordPayments(remoteRecord);
+  const payments=Array.isArray(next.payments)?clone(next.payments):[];
+  const indexes=new Map(payments.map((payment,index)=>[
+    paymentStableId(payment,index,next.id),
+    index
+  ]));
+
+  for(const item of Array.isArray(pendingItems)?pendingItems:[]){
+    if(item?.type!=="payment_upsert" || !item?.payment) continue;
+    const paymentId=String(item.paymentId || paymentStableId(item.payment,payments.length,next.id));
+    const payment={...clone(item.payment),id:paymentId,paymentId};
+    const index=indexes.get(paymentId);
+    if(index===undefined){
+      indexes.set(paymentId,payments.length);
+      payments.push(payment);
+    }else{
+      payments[index]=payment;
+    }
+  }
+
+  next.payments=payments;
+  return next;
+}
+
 function cloudAlreadyHasPayment(record,item){
   const payments=Array.isArray(record?.payments)?record.payments:[];
   const wanted=item?.payment || {};
@@ -1941,8 +1988,8 @@ async function flushRecordQueueReliably({db,recordItems,onProgress}){
     while(!fatalError){
       const index=nextIndex++;
       if(index>=queues.length) return;
-      try{
-        for(const item of queues[index]){
+      for(const item of queues[index]){
+        try{
           traceRecordFlush("before_flush_one",item);
           await withTimeout(
             flushRecordOne({db},item),
@@ -1950,23 +1997,21 @@ async function flushRecordQueueReliably({db,recordItems,onProgress}){
             `账单 ${String(item?.recordId||"")} 同步`
           );
           traceRecordFlush("after_flush_one",item);
-        }
-        completedGroups+=1;
-        onProgress?.(completedGroups,queues.length);
-      }catch(error){
-        traceRecordFlush("flush_error",queues[index]?.[0],error);
-        if(isRecordSyncConflict(error)){
-          const item=error?.conflictItem
-            || queues[index].find(candidate=>candidate?.type==="record_patch")
-            || queues[index][0];
-          await quarantineConflict(db,item,error,"recordQueue");
-          console.warn("可靠补偿路径检测到账单冲突，已采用云端版本",item,error);
-          completedGroups+=1;
-          onProgress?.(completedGroups,queues.length);
-        }else{
+        }catch(error){
+          traceRecordFlush("flush_error",item,error);
+          if(isRecordSyncConflict(error)){
+            const conflictItem=error?.conflictItem || item;
+            await quarantineConflict(db,conflictItem,error,"recordQueue");
+            console.warn("可靠补偿路径已隔离账单字段冲突，并继续补传付款流水",conflictItem,error);
+            continue;
+          }
           fatalError=error;
+          break;
         }
       }
+      if(fatalError) return;
+      completedGroups+=1;
+      onProgress?.(completedGroups,queues.length);
     }
   };
   await Promise.all(Array.from({length:workerCount},()=>worker()));
@@ -2160,9 +2205,9 @@ async function quarantineConflict(db,item,error,storeName){
     console.warn("云端冲突日志保存失败，已保留本机副本",logError);
   }
 
-  // 账单字段冲突时云端版本是已经提交成功的营业事实。待办被隔离后，必须
-  // 同时用云端账单替换本机乐观副本，否则各设备即使没有待办，营业额仍会
-  // 因本机较新的 localUpdatedAt 而长期不一致。
+  // 账单字段冲突时，账单资料以云端为准；付款流水则是独立、不可覆盖的
+  // 操作。刷新本机副本时必须把仍待上传的 payment_upsert 合并回来，否则
+  // 追加套餐/续时的补收会先从画面消失，随后还可能被误判为不需要补传。
   if(storeName==="recordQueue" && item?.recordId && navigator.onLine){
     try{
       const snap=await withTimeout(
@@ -2171,7 +2216,13 @@ async function quarantineConflict(db,item,error,storeName){
         `读取冲突账单 ${item.recordId}`
       );
       if(snap.exists()){
-        const remote={id:snap.id,...snap.data()};
+        const pending=(await queueAll("recordQueue")).filter(candidate=>
+          String(candidate?.recordId||"")===String(item.recordId)
+        );
+        const remote=mergePendingPaymentsIntoRecord(
+          {id:snap.id,...snap.data()},
+          pending
+        );
         const local=await loadLocalRecords().catch(()=>[]);
         const next=local.filter(record=>String(record?.id)!==String(item.recordId));
         next.push(remote);

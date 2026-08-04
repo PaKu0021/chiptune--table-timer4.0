@@ -76,7 +76,7 @@
 
 <script type="module">
 import { db } from "./js/firebase.js?v=4.0.71";
-import { loadLocalState, reconcileCloudState, loadLocalRecords, mergeRecordLists, installConnectionGuard, flushPending, subscribeAllRecords } from "./js/safe-state.js?v=4.0.71";
+import { loadLocalState, reconcileCloudState, loadLocalRecords, mergeRecordLists, installConnectionGuard, flushPending, subscribeAllRecords } from "./js/safe-state.js?v=4.0.72";
 import { getCurrentBusinessDate, getRecordBusinessDate } from "./js/business-day.js?v=4.0.71";
 import { doc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 const ref = doc(db,"shop","main");

@@ -1,19 +1,18 @@
-﻿<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>桌位时间</title>
-<link rel="stylesheet" href="./css/style.css">
+<title>正在跳转 - Chiptune</title>
 </head>
-
-<body>
-  <div class="display-card">
-    <h2 id="tableName">加载中...</h2>
-    <h1 id="timeText">--:--:--</h1>
-    <p id="statusText"></p>
-  </div>
-
-  <script type="module" src="./js/display.js?v=4.0.71"></script>
+<body style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;text-align:center;padding-top:40vh;color:#555;">
+  正在跳转到桌位时间页面…
+  <script>
+    (function(){
+      var table = new URLSearchParams(location.search).get("table");
+      var target = "https://chiptune-table-timer.web.app/display.html" + (table ? "?table=" + encodeURIComponent(table) : "");
+      location.replace(target);
+    })();
+  </script>
 </body>
 </html>
